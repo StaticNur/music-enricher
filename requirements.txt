@@ -1,0 +1,41 @@
+# Core async HTTP
+httpx[asyncio]>=0.27.0
+
+# MongoDB async driver
+motor>=3.4.0
+pymongo>=4.8.0
+
+# Data validation and settings
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+
+# Retry logic
+tenacity>=8.4.0
+
+# Structured logging
+structlog>=24.2.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# Fuzzy string matching (for Genius lyrics matching)
+rapidfuzz>=3.9.0
+
+# HTML parsing for lyrics scraping
+beautifulsoup4>=4.12.0
+lxml>=5.2.0
+
+# Data export
+pandas>=2.2.0
+
+# Language detection
+langdetect>=1.0.9
+
+# Async utilities
+aiofiles>=23.2.1
+
+# Transliteration: Cyrillic (ru, uk, ka, hy, kk, etc.) → Latin
+transliterate>=1.10.2
+
+# Unicode normalization helpers (for Arabic/CJK text)
+unicodedata2>=15.1.0

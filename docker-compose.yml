@@ -1,0 +1,124 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────
+# Music Metadata Enrichment Pipeline
+# ─────────────────────────────────────────────────
+
+x-worker-common: &worker-common
+  build: .
+  restart: always
+  env_file: .env
+  networks:
+    - telegram-bot-network
+  volumes:
+    - exports:/data/exports
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "50m"
+      max-file: "5"
+
+services:
+
+  # ── Seeder (runs once, exits) ─────────────────────
+  seeder:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: seeder
+    # Run once and exit — restart: on-failure so it re-seeds only if crashed
+    restart: on-failure
+
+  # ── Playlist Worker ───────────────────────────────
+  playlist-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: playlist_worker
+    depends_on:
+      seeder:
+        condition: service_started
+
+  # ── Artist Expansion Worker ───────────────────────
+  artist-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: artist_worker
+
+  # ── Genre Expansion Worker ────────────────────────
+  genre-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: genre_worker
+
+  # ── Audio Features Worker ─────────────────────────
+  audio-features-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: audio_features_worker
+
+  # ── Lyrics Worker ─────────────────────────────────
+  lyrics-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: lyrics_worker
+
+  # ── Quality Scoring Worker ────────────────────────
+  quality-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: quality_worker
+
+  # ── Exporter (runs on-demand or periodically) ─────
+  exporter:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: exporter
+    restart: "no"
+
+  # ════════════════════════════════════════════════
+  # v2: Regional & MusicBrainz Extension Workers
+  # ════════════════════════════════════════════════
+
+  # ── Regional Seed Worker ──────────────────────────
+  # Self-seeding: bootstraps regional_seed_queue on first run,
+  # then processes regional search queries indefinitely.
+  regional-seed-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: regional_seed_worker
+
+  # ── Language Detection Worker ─────────────────────
+  # Supplementary pass — runs on all tracks regardless of status.
+  # Can run many instances safely (optimistic locking prevents conflicts).
+  language-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: language_worker
+
+  # ── Transliteration Worker ────────────────────────
+  # Generates normalized_name and transliterated_name for non-Latin tracks.
+  # CPU-light — can share resources with other workers.
+  transliteration-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: transliteration_worker
+
+  # ── MusicBrainz Enrichment Worker ────────────────
+  # Strict 1 req/s rate limit enforced in code.
+  # DO NOT run multiple replicas — MusicBrainz will ban the IP.
+  # Priority queue: Central Asia > CIS > MENA > general catalog.
+  musicbrainz-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: musicbrainz_worker
+    # Single instance only — rate limit is per-IP
+    deploy:
+      replicas: 1
+
+networks:
+  telegram-bot-network:
+    external: true
+    name: telegram-bot-network
+
+volumes:
+  exports:
+    driver: local
