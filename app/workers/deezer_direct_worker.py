@@ -382,7 +382,9 @@ class DeezerDirectWorker(BaseWorker):
             "markets_count": 0,
             "markets": [],
             "status": TrackStatus.BASE_COLLECTED.value,
-            "appearance_score": 1,
+            # NOTE: appearance_score intentionally omitted here — $inc handles
+            # both insert (0+1=1) and update (+1). MongoDB disallows the same
+            # path in both $setOnInsert and $inc simultaneously.
             "version_album_ids": [],
             "youtube_searched": False,
             "musicbrainz_enriched": False,
