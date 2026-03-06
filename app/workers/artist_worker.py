@@ -145,6 +145,7 @@ class ArtistWorker(BaseWorker):
                         "status": QueueStatus.DONE.value,
                         "updated_at": now,
                         "locked_at": None,
+                        "locked_by": None,
                     }
                 },
             )
@@ -172,6 +173,7 @@ class ArtistWorker(BaseWorker):
                         "retry_count": retry_count,
                         "updated_at": now,
                         "locked_at": None,
+                        "locked_by": None,
                     }
                 },
             )

@@ -180,6 +180,7 @@ class CandidateMatchWorker(BaseWorker):
                     "processed": True,
                     "matched_spotify_id": matched_spotify_id,
                     "locked_at": None,
+                    "locked_by": None,
                     "updated_at": now,
                 }},
             )
@@ -198,6 +199,7 @@ class CandidateMatchWorker(BaseWorker):
                     "processed": processed,
                     "retry_count": retry_count,
                     "locked_at": None,
+                    "locked_by": None,
                     "updated_at": now,
                 }},
             )
@@ -349,6 +351,12 @@ class CandidateMatchWorker(BaseWorker):
                 },
                 upsert=True,
             )
+            # Backfill real spotify_id if existing doc has a deezer: placeholder
+            if result.upserted_id is None:
+                await col.update_one(
+                    {**filter_q, "spotify_id": {"$regex": "^deezer:"}},
+                    {"$set": {"spotify_id": track.spotify_id, "updated_at": now}},
+                )
             return result.upserted_id is not None
         except Exception as exc:
             if "duplicate key" in str(exc).lower():

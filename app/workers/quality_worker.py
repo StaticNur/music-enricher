@@ -55,7 +55,14 @@ class QualityWorker(BaseWorker):
         cursor = col.find(
             {
                 "$or": [
-                    {"status": TrackStatus.LYRICS_ADDED.value},
+                    # Accept both lyrics_added (normal flow) and audio_features_added
+                    # (direct path when lyrics_worker hasn't reached the track yet).
+                    # At 10M+ scale Genius enrichment takes weeks — quality scoring
+                    # must not be gated on it.
+                    {"status": {"$in": [
+                        TrackStatus.LYRICS_ADDED.value,
+                        TrackStatus.AUDIO_FEATURES_ADDED.value,
+                    ]}},
                     self.stale_lock_query(),
                 ]
             }
@@ -173,6 +180,7 @@ class QualityWorker(BaseWorker):
                         "artist_followers": artist_followers,
                         "updated_at": now,
                         "locked_at": None,
+                        "locked_by": None,
                     }
                 },
             )
@@ -196,7 +204,7 @@ class QualityWorker(BaseWorker):
             new_status = (
                 TrackStatus.FAILED.value
                 if retry >= self.settings.worker_retry_limit
-                else TrackStatus.LYRICS_ADDED.value
+                else TrackStatus.AUDIO_FEATURES_ADDED.value  # safe fallback for both input statuses
             )
             await col.update_one(
                 {"spotify_id": sid},
@@ -207,6 +215,7 @@ class QualityWorker(BaseWorker):
                         else new_status,
                         "retry_count": retry,
                         "locked_at": None,
+                        "locked_by": None,
                         "updated_at": now,
                     },
                     "$push": {"error_log": str(exc)[:200]},

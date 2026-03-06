@@ -56,6 +56,11 @@ WORKER_TYPES = {
     "ytmusic_worker",
     "discogs_worker",
     "candidate_match_worker",
+    # v4 artist graph expansion
+    "artist_graph_worker",
+    "youtube_enrichment_worker",
+    # v5 Deezer direct discovery (no Spotify required)
+    "deezer_direct_worker",
 }
 
 
@@ -158,6 +163,25 @@ async def _run_worker(worker_type: str) -> None:
         elif worker_type == "candidate_match_worker":
             from app.workers.candidate_match_worker import CandidateMatchWorker
             worker = CandidateMatchWorker(db, settings)
+            await worker.run()
+
+        # ── v4: artist graph expansion workers ────────────────────────────────
+
+        elif worker_type == "artist_graph_worker":
+            from app.workers.artist_graph_worker import ArtistGraphWorker
+            worker = ArtistGraphWorker(db, settings)
+            await worker.run()
+
+        elif worker_type == "youtube_enrichment_worker":
+            from app.workers.youtube_enrichment_worker import YoutubeEnrichmentWorker
+            worker = YoutubeEnrichmentWorker(db, settings)
+            await worker.run()
+
+        # ── v5: Deezer direct discovery (no Spotify required) ─────────────────
+
+        elif worker_type == "deezer_direct_worker":
+            from app.workers.deezer_direct_worker import DeezerDirectWorker
+            worker = DeezerDirectWorker(db, settings)
             await worker.run()
 
         else:

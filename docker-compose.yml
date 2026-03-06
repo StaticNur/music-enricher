@@ -36,16 +36,19 @@ services:
         condition: service_started
 
   # ── Artist Expansion Worker ───────────────────────
+  # Rate-limited to prevent Spotify ban alongside other Spotify workers
   artist-worker:
     <<: *worker-common
     environment:
       WORKER_TYPE: artist_worker
+      SPOTIFY_RATE_LIMIT_RPS: "2"
 
   # ── Genre Expansion Worker ────────────────────────
   genre-worker:
     <<: *worker-common
     environment:
       WORKER_TYPE: genre_worker
+      SPOTIFY_RATE_LIMIT_RPS: "2"
 
   # ── Audio Features Worker ─────────────────────────
   audio-features-worker:
@@ -152,6 +155,48 @@ services:
     <<: *worker-common
     environment:
       WORKER_TYPE: candidate_match_worker
+      SPOTIFY_RATE_LIMIT_RPS: "3"
+
+  # ════════════════════════════════════════════════
+  # v4: Artist Graph Expansion
+  # ════════════════════════════════════════════════
+
+  # ── Artist Graph Worker ───────────────────────
+  # Expands catalog by traversing the artist collaboration graph:
+  #   seed artists → full discography (album+single+compilation+appears_on)
+  #   → featured artists → related artists (up to depth=5).
+  # Each artist/album processed exactly once via MongoDB caches.
+  # Horizontally scalable — optimistic locking on artist_graph_queue.
+  # Expected scale: 50k–100k artists, 10M–30M tracks at depth=5.
+  artist-graph-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: artist_graph_worker
+      SPOTIFY_RATE_LIMIT_RPS: "3"
+
+  # ── YouTube Enrichment Worker ─────────────────
+  # Supplementary pass: searches YouTube Music for a video ID for
+  # tracks that don't have one. Uses ytmusicapi (no credentials).
+  # Sets youtube_searched=True after each attempt (found or not).
+  # Horizontally scalable.
+  youtube-enrichment-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: youtube_enrichment_worker
+
+  # ════════════════════════════════════════════════
+  # v5: Deezer Direct Discovery (Spotify-independent)
+  # ════════════════════════════════════════════════
+
+  # ── Deezer Direct Worker ──────────────────────
+  # Inserts tracks directly from Deezer API into the pipeline.
+  # NO Spotify API required — works even when Spotify is rate-limited.
+  # Uses "deezer:{id}" placeholder spotify_id; ISRC dedup prevents
+  # conflicts with real Spotify tracks. Horizontally scalable.
+  deezer-direct-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: deezer_direct_worker
 
 networks:
   telegram-bot-network:

@@ -104,6 +104,40 @@ class YtMusicClient:
             logger.warning("ytmusic_search_failed", query=query, error=str(exc))
             return []
 
+    async def search_track_video(
+        self, artist: str, title: str, limit: int = 5
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Search YouTube Music for a specific track and return the best raw result.
+
+        Query: ``"{artist} {title} official audio"`` with ``filter="songs"``
+        to prefer music content over general videos.
+
+        Returns the first (best-ranked) result dict from ytmusicapi, or
+        ``None`` if nothing was found or an error occurred.
+
+        The caller is responsible for confidence-scoring the result.
+        """
+        self._init_client()
+        query = f"{artist} {title} official audio"
+
+        async def _fetch() -> List[Dict[str, Any]]:
+            assert self._yt is not None
+            results = await self._run(
+                self._yt.search, query, filter="songs", limit=limit
+            )
+            return results or []
+
+        try:
+            results = await self._retry(_fetch)()
+            return results[0] if results else None
+        except Exception as exc:
+            logger.warning(
+                "ytmusic_track_video_search_failed",
+                artist=artist, title=title, error=str(exc),
+            )
+            return None
+
     async def get_charts(self, country: str = "US") -> Dict[str, Any]:
         """
         Fetch the top-songs chart for a given country.

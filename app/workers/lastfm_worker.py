@@ -55,6 +55,25 @@ LASTFM_TAGS: List[str] = [
     "drum and bass", "dubstep", "trance", "deep house", "techno",
     "psychedelic", "shoegaze", "post-rock", "math rock",
     "neo-soul", "trap music", "phonk", "synthwave", "vaporwave",
+    # CIS / Post-Soviet
+    "russian", "russian pop", "russian rock", "russian rap", "russian hip-hop",
+    "russian indie", "shanson", "post-soviet", "estrada",
+    "ukrainian", "ukrainian pop", "ukrainian rock",
+    "belarusian", "georgian", "armenian", "azerbaijani",
+    "moldovan music", "latvian music", "lithuanian music",
+    # Central Asia
+    "uzbek", "uzbek pop", "uzbek music", "uzbek rap",
+    "kazakh", "kazakh pop", "kazakh music", "kazakh rap",
+    "kyrgyz music", "tajik music", "turkmen music",
+    "central asian", "central asian folk",
+    # MENA
+    "arabic", "arabic pop", "arabic hip hop", "khaleeji", "mahrajan",
+    "turkish", "turkish pop", "turkish rock", "turkish rap",
+    "persian", "iranian pop", "afro house",
+    # South & East Asia (broader coverage)
+    "hindi", "bollywood pop", "punjabi", "bhojpuri",
+    "mandopop", "cantopop", "thai pop", "vietnamese pop",
+    "indonesian pop", "opm",
 ]
 
 # Seed items: (tag, method). Empty tag means the global chart.
@@ -92,14 +111,30 @@ class LastFmWorker(BaseWorker):
             await self._lastfm.aclose()
 
     async def _bootstrap_queue(self) -> None:
-        """Populate lastfm_seed_queue if empty (idempotent via $setOnInsert)."""
+        """Populate lastfm_seed_queue if no pending items remain.
+
+        On first run: inserts all tag/method seed items.
+        On subsequent runs (all tags exhausted): resets done items back to
+        pending from page 1 so all tags are re-crawled in the next cycle.
+        """
         col = self.db[LASTFM_SEED_QUEUE_COL]
-        existing = await col.count_documents({})
-        if existing > 0:
-            logger.info("lastfm_queue_already_seeded", count=existing)
+        now = datetime.now(timezone.utc)
+
+        pending = await col.count_documents({"status": QueueStatus.PENDING.value})
+        if pending > 0:
+            logger.info("lastfm_queue_has_pending", count=pending)
             return
 
-        now = datetime.now(timezone.utc)
+        # Reset exhausted tags back to page 1 for another discovery cycle
+        reset = await col.update_many(
+            {"status": QueueStatus.DONE.value},
+            {"$set": {"status": QueueStatus.PENDING.value, "page": 1, "updated_at": now}},
+        )
+        if reset.modified_count > 0:
+            logger.info("lastfm_queue_reset_for_next_cycle", count=reset.modified_count)
+            return
+
+        # Collection is empty — seed from scratch
         ops = []
         for item in _SEED_ITEMS:
             seed = LastFmSeedItem(
@@ -175,6 +210,7 @@ class LastFmWorker(BaseWorker):
                     {"$set": {
                         "status": QueueStatus.DONE.value,
                         "locked_at": None,
+                        "locked_by": None,
                         "updated_at": now,
                     }},
                 )
@@ -201,6 +237,7 @@ class LastFmWorker(BaseWorker):
                     "status": new_status,
                     "page": next_page,
                     "locked_at": None,
+                    "locked_by": None,
                     "updated_at": now,
                 }},
             )
@@ -229,6 +266,7 @@ class LastFmWorker(BaseWorker):
                     "status": new_status,
                     "retry_count": retry_count,
                     "locked_at": None,
+                    "locked_by": None,
                     "updated_at": now,
                 }},
             )

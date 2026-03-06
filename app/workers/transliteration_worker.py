@@ -151,12 +151,16 @@ class TransliterationWorker(BaseWorker):
                 "normalized_artist_name": normalized_artist,
                 "transliteration_done": True,
                 "locked_at": None,
+                "locked_by": None,
                 "updated_at": now,
             }
             if transliterated_name:
                 update["transliterated_name"] = transliterated_name
 
             await col.update_one({"spotify_id": sid}, {"$set": update})
+            await self.increment_stat("transliteration_done")
+            if transliterated_name:
+                await self.increment_stat("transliteration_converted")
 
             logger.debug(
                 "transliteration_done",
@@ -179,6 +183,7 @@ class TransliterationWorker(BaseWorker):
                 {"$set": {
                     "transliteration_done": True,
                     "locked_at": None,
+                    "locked_by": None,
                     "updated_at": now,
                 }},
             )

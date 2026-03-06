@@ -158,6 +158,7 @@ class LanguageWorker(BaseWorker):
                 "language_detected": True,
                 "regions": regions,
                 "locked_at": None,
+                "locked_by": None,
                 "updated_at": now,
             }
             if language:
@@ -171,6 +172,13 @@ class LanguageWorker(BaseWorker):
                 update["mb_priority"] = mb_priority
 
             await col.update_one({"spotify_id": sid}, {"$set": update})
+            await self.increment_stat("language_detected")
+            if regions.get("cis"):
+                await self.increment_stat("language_region_cis")
+            if regions.get("central_asia"):
+                await self.increment_stat("language_region_central_asia")
+            if regions.get("mena"):
+                await self.increment_stat("language_region_mena")
 
             logger.debug(
                 "language_detected",
@@ -195,6 +203,7 @@ class LanguageWorker(BaseWorker):
                 {"$set": {
                     "language_detected": True,  # Mark done to prevent retry loops
                     "locked_at": None,
+                    "locked_by": None,
                     "updated_at": now,
                 }},
             )
@@ -229,21 +238,29 @@ class LanguageWorker(BaseWorker):
 
         script = self._detect_script_from_text(combined) if combined else None
 
-        # Attempt language detection from title (less reliable, short text)
+        # Attempt language detection from title (less reliable, short text).
+        # Require len >= 10 and confidence >= 0.8 to avoid false positives.
         lang = None
-        if combined and len(combined) >= 4:
-            lang = self._detect_lang_from_text(combined)
+        if combined and len(combined) >= 10:
+            lang = self._detect_lang_from_text(combined, min_confidence=0.8)
 
         return lang, script, "title_detection"
 
     @staticmethod
-    def _detect_lang_from_text(text: str) -> Optional[str]:
-        """Detect language using langdetect. Returns ISO 639-1 or None."""
+    def _detect_lang_from_text(text: str, min_confidence: float = 0.0) -> Optional[str]:
+        """Detect language using langdetect. Returns ISO 639-1 or None.
+
+        ``min_confidence`` filters out unreliable detections on short text.
+        Use 0.8 for title-based detection; leave at 0.0 for long lyrics.
+        """
         if not text:
             return None
         try:
-            from langdetect import detect, LangDetectException
-            return detect(text[:1000])
+            from langdetect import detect_langs
+            results = detect_langs(text[:1000])
+            if results and results[0].prob >= min_confidence:
+                return results[0].lang
+            return None
         except Exception:
             return None
 

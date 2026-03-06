@@ -31,6 +31,14 @@ LASTFM_SEED_QUEUE_COL = "lastfm_seed_queue"
 YTMUSIC_SEED_QUEUE_COL = "ytmusic_seed_queue"
 DISCOGS_SEED_QUEUE_COL = "discogs_seed_queue"
 
+# v4: artist graph expansion
+ARTIST_GRAPH_QUEUE_COL   = "artist_graph_queue"
+ARTIST_PROCESSED_CACHE_COL = "artist_processed_cache"
+ALBUM_PROCESSED_CACHE_COL  = "album_processed_cache"
+
+# v5: Deezer direct discovery (no Spotify required)
+DEEZER_SEED_QUEUE_COL = "deezer_seed_queue"
+
 
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
     """
@@ -43,6 +51,8 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type
     await _ensure_artist_indexes(db)
     await _ensure_queue_indexes(db)
     await _ensure_v3_indexes(db)
+    await _ensure_graph_indexes(db)
+    await _ensure_deezer_indexes(db)
     logger.info("indexes_ensured")
 
 
@@ -214,4 +224,60 @@ async def _ensure_v3_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[
     await dc_col.create_indexes([
         IndexModel([("style", ASCENDING)], unique=True, name="style_unique"),
         IndexModel([("status", ASCENDING)], name="status_idx"),
+    ])
+
+
+async def _ensure_graph_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Create indexes for v4 artist graph expansion collections."""
+
+    # artist_graph_queue — artist_id is unique; sort by priority DESC
+    ag_col = db[ARTIST_GRAPH_QUEUE_COL]
+    await ag_col.create_indexes([
+        IndexModel([("artist_id", ASCENDING)], unique=True, name="artist_id_unique"),
+        # Polling: unprocessed, not locked, highest priority first
+        IndexModel(
+            [("processed", ASCENDING), ("locked_at", ASCENDING), ("priority", DESCENDING)],
+            name="processed_locked_priority_idx",
+        ),
+        IndexModel([("depth", ASCENDING)], name="depth_idx"),
+        IndexModel([("source", ASCENDING)], name="source_idx"),
+    ])
+
+    # artist_processed_cache — simple lookup by artist_id
+    apc_col = db[ARTIST_PROCESSED_CACHE_COL]
+    await apc_col.create_indexes([
+        IndexModel([("artist_id", ASCENDING)], unique=True, name="artist_id_unique"),
+        IndexModel([("processed_at", DESCENDING)], name="processed_at_idx"),
+    ])
+
+    # album_processed_cache — simple lookup by album_id
+    alc_col = db[ALBUM_PROCESSED_CACHE_COL]
+    await alc_col.create_indexes([
+        IndexModel([("album_id", ASCENDING)], unique=True, name="album_id_unique"),
+        IndexModel([("processed_at", DESCENDING)], name="processed_at_idx"),
+    ])
+
+    # Compound index on tracks for youtube_enrichment_worker polling
+    tr_col = db[TRACKS_COL]
+    try:
+        await tr_col.create_indexes([
+            IndexModel(
+                [("youtube_searched", ASCENDING), ("status", ASCENDING)],
+                name="youtube_searched_status_idx",
+            ),
+        ])
+    except Exception:
+        pass  # Index may already exist from track indexes above
+
+
+async def _ensure_deezer_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Create indexes for v5 Deezer direct discovery queue."""
+    col = db[DEEZER_SEED_QUEUE_COL]
+    await col.create_indexes([
+        IndexModel([("artist_id", ASCENDING)], unique=True, name="artist_id_unique"),
+        IndexModel(
+            [("processed", ASCENDING), ("locked_at", ASCENDING)],
+            name="processed_locked_idx",
+        ),
+        IndexModel([("genre_id", ASCENDING)], name="genre_id_idx"),
     ])

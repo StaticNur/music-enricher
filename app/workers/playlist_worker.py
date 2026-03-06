@@ -208,6 +208,7 @@ class PlaylistWorker(BaseWorker):
                         "tracks_total": tracks_processed,
                         "updated_at": now,
                         "locked_at": None,
+                        "locked_by": None,
                     }
                 },
             )
@@ -235,6 +236,7 @@ class PlaylistWorker(BaseWorker):
                         "retry_count": retry_count,
                         "updated_at": now,
                         "locked_at": None,
+                        "locked_by": None,
                     }
                 },
             )
@@ -271,6 +273,13 @@ class PlaylistWorker(BaseWorker):
                 },
                 upsert=True,
             )
+            # Backfill markets on existing docs that were stored with empty markets
+            markets_list = track.markets
+            if markets_list:
+                await col.update_one(
+                    {**filter_query, "markets": {"$size": 0}},
+                    {"$set": {"markets": markets_list, "markets_count": len(markets_list), "updated_at": now}},
+                )
             return result.upserted_id is not None
         except Exception as exc:
             # Duplicate key on spotify_id (race between two workers)

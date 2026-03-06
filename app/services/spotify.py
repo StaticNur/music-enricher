@@ -140,8 +140,13 @@ class SpotifyClient:
 
         if resp.status_code == 429:
             retry_after = int(resp.headers.get("Retry-After", "1"))
-            logger.warning("spotify_rate_limited", retry_after=retry_after)
-            await asyncio.sleep(retry_after)
+            sleep_for = min(retry_after, self._settings.spotify_max_rate_limit_sleep)
+            logger.warning(
+                "spotify_rate_limited",
+                retry_after=retry_after,
+                sleeping_for=sleep_for,
+            )
+            await asyncio.sleep(sleep_for)
             raise SpotifyRateLimit(retry_after)
 
         if resp.status_code in (401, 403):
@@ -316,6 +321,53 @@ class SpotifyClient:
             offset += limit
 
     # ── Artist endpoints ──────────────────────────────────────────────────────
+
+    async def get_artist(self, artist_id: str) -> Optional[Dict]:
+        """
+        Fetch a single artist by Spotify ID.
+
+        Returns ``None`` on 404 (artist removed) or other errors.
+        """
+        async def _fetch() -> Dict:
+            return await self._get(f"/artists/{artist_id}")
+
+        try:
+            return await self._retry(_fetch)()
+        except SpotifyError as exc:
+            if exc.status == 404:
+                logger.debug("artist_not_found", artist_id=artist_id)
+                return None
+            logger.warning("get_artist_failed", artist_id=artist_id, error=str(exc))
+            return None
+        except Exception as exc:
+            logger.warning("get_artist_failed", artist_id=artist_id, error=str(exc))
+            return None
+
+    async def get_related_artists(self, artist_id: str) -> List[Dict]:
+        """
+        Fetch up to 20 related artists for an artist.
+
+        Returns an empty list on any error (endpoint may be restricted
+        for some API tiers).
+        """
+        async def _fetch() -> List[Dict]:
+            data = await self._get(f"/artists/{artist_id}/related-artists")
+            return data.get("artists") or []
+
+        try:
+            return await self._retry(_fetch)()
+        except SpotifyError as exc:
+            if exc.status in (403, 404):
+                logger.debug(
+                    "related_artists_unavailable",
+                    artist_id=artist_id, status=exc.status,
+                )
+                return []
+            logger.warning("get_related_artists_failed", artist_id=artist_id, error=str(exc))
+            return []
+        except Exception as exc:
+            logger.warning("get_related_artists_failed", artist_id=artist_id, error=str(exc))
+            return []
 
     async def get_artists(self, artist_ids: List[str]) -> List[Optional[Dict]]:
         """Fetch up to 50 artists by ID."""

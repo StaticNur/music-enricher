@@ -65,6 +65,18 @@ DISCOGS_STYLES: List[str] = [
     "swing", "bebop", "smooth jazz", "free jazz",
     "disco", "funk soul", "motown",
     "singer-songwriter", "acoustic",
+    # CIS / Eastern European
+    "russian pop", "russian rock", "chanson", "bard",
+    "soviet pop", "osteuropaeische musik",
+    "ukrainian folk", "georgian folk", "balkan",
+    # Central Asia
+    "uzbek pop", "kazakh pop", "central asian folk",
+    # MENA
+    "arabic pop", "khaleeji", "raï", "turkish pop", "anatolian rock",
+    "shaabi", "mahraganat",
+    # Extended world
+    "bollywood", "filmi", "bhangra",
+    "fado", "flamenco", "tango",
 ]
 
 
@@ -98,14 +110,30 @@ class DiscogsWorker(BaseWorker):
             await self._discogs.aclose()
 
     async def _bootstrap_queue(self) -> None:
-        """Populate discogs_seed_queue if empty (idempotent via $setOnInsert)."""
+        """Populate discogs_seed_queue if no pending items remain.
+
+        On first run: inserts all genre style items.
+        On subsequent runs (all items done): resets them to pending page 1
+        so all styles are re-crawled in the next cycle.
+        """
         col = self.db[DISCOGS_SEED_QUEUE_COL]
-        existing = await col.count_documents({})
-        if existing > 0:
-            logger.info("discogs_queue_already_seeded", count=existing)
+        now = datetime.now(timezone.utc)
+
+        pending = await col.count_documents({"status": QueueStatus.PENDING.value})
+        if pending > 0:
+            logger.info("discogs_queue_has_pending", count=pending)
             return
 
-        now = datetime.now(timezone.utc)
+        # Reset exhausted styles back to page 1 for another cycle
+        reset = await col.update_many(
+            {"status": QueueStatus.DONE.value},
+            {"$set": {"status": QueueStatus.PENDING.value, "page": 1, "updated_at": now}},
+        )
+        if reset.modified_count > 0:
+            logger.info("discogs_queue_reset_for_next_cycle", count=reset.modified_count)
+            return
+
+        # Collection is empty — seed from scratch
         ops = []
         for style in DISCOGS_STYLES:
             seed = DiscogsSeedItem(
@@ -223,6 +251,7 @@ class DiscogsWorker(BaseWorker):
                         "status": QueueStatus.PENDING.value,
                         "page": next_page,
                         "locked_at": None,
+                        "locked_by": None,
                         "updated_at": now,
                     }},
                 )
@@ -251,6 +280,7 @@ class DiscogsWorker(BaseWorker):
                     "status": new_status,
                     "retry_count": retry_count,
                     "locked_at": None,
+                    "locked_by": None,
                     "updated_at": now,
                 }},
             )
@@ -261,6 +291,7 @@ class DiscogsWorker(BaseWorker):
             {"$set": {
                 "status": QueueStatus.DONE.value,
                 "locked_at": None,
+                "locked_by": None,
                 "updated_at": now,
             }},
         )

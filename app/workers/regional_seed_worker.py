@@ -148,11 +148,27 @@ class RegionalSeedWorker(BaseWorker):
             await self._spotify.aclose()
 
     async def _bootstrap_queue(self) -> None:
-        """Populate regional_seed_queue if empty (idempotent via upsert)."""
+        """Populate regional_seed_queue if no pending items remain.
+
+        On first run: inserts all regional query items.
+        On subsequent runs (all queries done): resets them back to pending
+        so regional searches are refreshed in the next cycle.
+        """
         col = self.db[REGIONAL_SEED_QUEUE_COL]
-        existing = await col.count_documents({})
-        if existing > 0:
-            logger.info("regional_queue_already_seeded", count=existing)
+        now = datetime.now(timezone.utc)
+
+        pending = await col.count_documents({"status": QueueStatus.PENDING.value})
+        if pending > 0:
+            logger.info("regional_queue_has_pending", count=pending)
+            return
+
+        # Reset completed queries for another discovery cycle
+        reset = await col.update_many(
+            {"status": QueueStatus.DONE.value},
+            {"$set": {"status": QueueStatus.PENDING.value, "offset": 0, "updated_at": now}},
+        )
+        if reset.modified_count > 0:
+            logger.info("regional_queue_reset_for_next_cycle", count=reset.modified_count)
             return
 
         ops = []
@@ -302,6 +318,7 @@ class RegionalSeedWorker(BaseWorker):
                     "status": QueueStatus.DONE.value,
                     "updated_at": now,
                     "locked_at": None,
+                    "locked_by": None,
                 }},
             )
             await self.increment_stat("total_discovered", new_tracks_total)
@@ -328,6 +345,7 @@ class RegionalSeedWorker(BaseWorker):
                     "retry_count": retry,
                     "updated_at": now,
                     "locked_at": None,
+                    "locked_by": None,
                 }},
             )
 

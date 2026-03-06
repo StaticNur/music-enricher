@@ -103,7 +103,17 @@ class YoutubeData(BaseModel):
     """YouTube video linked to this track (from ytmusic_worker or candidate_match_worker)."""
     video_id: str
     confidence: float = 1.0
-    source: str = "ytmusic"  # "ytmusic" | "search"
+    source: str = "ytmusic"  # "ytmusic" | "search" | "ytmusic_search"
+    # v4: extended by youtube_enrichment_worker
+    duration_ms: Optional[int] = None
+    channel: Optional[str] = None
+
+
+class TrackVersion(BaseModel):
+    """Records each album/release on which this track appears."""
+    album_id: str
+    release_date: Optional[str] = None
+    version_type: str = "album"  # album | single | compilation | appears_on
 
 
 class MusicBrainzData(BaseModel):
@@ -217,6 +227,15 @@ class TrackDocument(BaseModel):
 
     # ── Artist cache for quality scoring ──────────────────────────────────────
     artist_followers: int = 0       # followers of primary artist
+
+    # ── v4: artist graph discovery ────────────────────────────────────────────
+    # All album IDs this track has been discovered on (across releases).
+    # Used to track versions without creating duplicate track documents.
+    version_album_ids: List[str] = Field(default_factory=list)
+
+    # ── v4: YouTube enrichment flag ───────────────────────────────────────────
+    # Set True by youtube_enrichment_worker after searching (found or not).
+    youtube_searched: bool = False
 
     # ── State machine ─────────────────────────────────────────────────────────
     status: TrackStatus = TrackStatus.DISCOVERED

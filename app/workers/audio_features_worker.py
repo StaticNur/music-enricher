@@ -163,6 +163,7 @@ class AudioFeaturesWorker(BaseWorker):
                 "status": TrackStatus.AUDIO_FEATURES_ADDED.value,
                 "updated_at": now,
                 "locked_at": None,
+                "locked_by": None,
             }
             if audio_features:
                 update_doc["audio_features"] = audio_features.model_dump()
@@ -192,6 +193,7 @@ class AudioFeaturesWorker(BaseWorker):
                             "status": new_status,
                             "retry_count": retry,
                             "locked_at": None,
+                            "locked_by": None,
                         },
                         "$push": {"error_log": str(exc)[:200]},
                     },

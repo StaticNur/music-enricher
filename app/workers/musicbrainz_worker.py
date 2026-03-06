@@ -156,6 +156,7 @@ class MusicBrainzWorker(BaseWorker):
             update: Dict[str, Any] = {
                 "musicbrainz_enriched": True,
                 "locked_at": None,
+                "locked_by": None,
                 "updated_at": now,
             }
 
@@ -246,6 +247,7 @@ class MusicBrainzWorker(BaseWorker):
                         "$set": {
                             "musicbrainz_enriched": True,
                             "locked_at": None,
+                            "locked_by": None,
                             "updated_at": now,
                         },
                         "$push": {"error_log": f"MB: {str(exc)[:200]}"},
@@ -258,6 +260,7 @@ class MusicBrainzWorker(BaseWorker):
                         "$set": {
                             "retry_count": retry,
                             "locked_at": None,
+                            "locked_by": None,
                             "updated_at": now,
                         },
                         "$push": {"error_log": f"MB: {str(exc)[:200]}"},

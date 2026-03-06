@@ -164,6 +164,7 @@ class GenreWorker(BaseWorker):
                         "status": QueueStatus.DONE.value,
                         "updated_at": now,
                         "locked_at": None,
+                        "locked_by": None,
                     }
                 },
             )
@@ -191,6 +192,7 @@ class GenreWorker(BaseWorker):
                         "retry_count": retry_count,
                         "updated_at": now,
                         "locked_at": None,
+                        "locked_by": None,
                     }
                 },
             )

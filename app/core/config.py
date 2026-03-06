@@ -28,8 +28,12 @@ class Settings(BaseSettings):
     # ── Spotify Web API ──────────────────────────────────────────────────────
     spotify_client_id: str = Field(default="")
     spotify_client_secret: str = Field(default="")
-    spotify_rate_limit_rps: float = Field(default=10.0)
+    spotify_rate_limit_rps: float = Field(default=3.0)
     spotify_max_retries: int = Field(default=5)
+    # Maximum seconds to honor Spotify Retry-After. Spotify issues bans of
+    # 20,000+ seconds when overloaded — we cap the sleep so workers don't
+    # stall for hours. Tenacity's backoff handles the remaining wait.
+    spotify_max_rate_limit_sleep: int = Field(default=60)
 
     # ── Genius API ───────────────────────────────────────────────────────────
     genius_access_token: str = Field(default="")
@@ -115,6 +119,36 @@ class Settings(BaseSettings):
 
     # ── Candidate matching (v3) ───────────────────────────────────────────────
     candidate_match_confidence: float = Field(default=0.8)  # min Spotify match score
+
+    # ── Artist graph expansion (v4) ───────────────────────────────────────────
+    # Maximum BFS depth from seed artists (0 = seed only)
+    artist_graph_max_depth: int = Field(default=5)
+    # Artists processed per worker iteration (small: each artist = many API calls)
+    artist_graph_batch_size: int = Field(default=3)
+    # How many artists to seed from existing tracks on first run
+    artist_graph_seed_limit: int = Field(default=500)
+    # Whether artist_graph_worker also searches YTMusic for video IDs
+    artist_graph_ytmusic_enabled: bool = Field(default=False)
+    # Max albums from own catalog (album+single+compilation) per artist.
+    # Set 0 to disable limit.
+    artist_graph_max_own_albums: int = Field(default=0)
+    # Max appears_on albums per artist. Popular artists can have 500–2000
+    # compilation albums — without this limit the worker stalls on artist #1.
+    artist_graph_max_appears_on: int = Field(default=50)
+
+    # ── YouTube enrichment (v4) ───────────────────────────────────────────────
+    # Minimum rapidfuzz confidence to accept a YTMusic search result
+    ytmusic_video_match_confidence: float = Field(default=0.65)
+
+    # ── Deezer direct discovery (v5) ─────────────────────────────────────────
+    # Artists processed per worker iteration
+    deezer_batch_size: int = Field(default=5)
+    # Top tracks fetched per artist (Deezer max = 100)
+    deezer_top_tracks_limit: int = Field(default=50)
+    # Whether to also crawl artist albums (more tracks but more API calls)
+    deezer_crawl_albums: bool = Field(default=True)
+    # Max albums crawled per artist when deezer_crawl_albums=True
+    deezer_max_albums_per_artist: int = Field(default=20)
 
     @property
     def target_regions_list(self) -> list[str]:

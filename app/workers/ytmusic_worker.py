@@ -100,14 +100,30 @@ class YtMusicWorker(BaseWorker):
         pass  # YtMusicClient has no async resources to close
 
     async def _bootstrap_queue(self) -> None:
-        """Populate ytmusic_seed_queue if empty (idempotent via $setOnInsert)."""
+        """Populate ytmusic_seed_queue if no pending items remain.
+
+        On first run: inserts all seed items.
+        On subsequent runs (all items done): resets done items back to
+        pending so the charts/searches are refreshed in the next cycle.
+        """
         col = self.db[YTMUSIC_SEED_QUEUE_COL]
-        existing = await col.count_documents({})
-        if existing > 0:
-            logger.info("ytmusic_queue_already_seeded", count=existing)
+        now = datetime.now(timezone.utc)
+
+        pending = await col.count_documents({"status": QueueStatus.PENDING.value})
+        if pending > 0:
+            logger.info("ytmusic_queue_has_pending", count=pending)
             return
 
-        now = datetime.now(timezone.utc)
+        # Reset completed items for another discovery cycle
+        reset = await col.update_many(
+            {"status": QueueStatus.DONE.value},
+            {"$set": {"status": QueueStatus.PENDING.value, "updated_at": now}},
+        )
+        if reset.modified_count > 0:
+            logger.info("ytmusic_queue_reset_for_next_cycle", count=reset.modified_count)
+            return
+
+        # Collection is empty — seed from scratch
         ops = []
 
         for country in YTMUSIC_CHART_COUNTRIES:
@@ -195,6 +211,7 @@ class YtMusicWorker(BaseWorker):
                 {"$set": {
                     "status": QueueStatus.DONE.value,
                     "locked_at": None,
+                    "locked_by": None,
                     "updated_at": now,
                 }},
             )
@@ -224,6 +241,7 @@ class YtMusicWorker(BaseWorker):
                     "status": new_status,
                     "retry_count": retry_count,
                     "locked_at": None,
+                    "locked_by": None,
                     "updated_at": now,
                 }},
             )

@@ -131,6 +131,7 @@ class LyricsWorker(BaseWorker):
                         "lyrics": lyrics_doc,
                         "updated_at": now,
                         "locked_at": None,
+                        "locked_by": None,
                     }
                 },
             )
@@ -172,6 +173,7 @@ class LyricsWorker(BaseWorker):
                         else new_status,
                         "retry_count": retry,
                         "locked_at": None,
+                        "locked_by": None,
                         "updated_at": now,
                     },
                     "$push": {"error_log": str(exc)[:200]},
