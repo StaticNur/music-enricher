@@ -99,6 +99,13 @@ class LyricsData(BaseModel):
     fetched_at: Optional[datetime] = None
 
 
+class YoutubeData(BaseModel):
+    """YouTube video linked to this track (from ytmusic_worker or candidate_match_worker)."""
+    video_id: str
+    confidence: float = 1.0
+    source: str = "ytmusic"  # "ytmusic" | "search"
+
+
 class MusicBrainzData(BaseModel):
     """
     MusicBrainz enrichment data.
@@ -176,6 +183,7 @@ class TrackDocument(BaseModel):
     # ── Enrichment data ───────────────────────────────────────────────────────
     audio_features: Optional[AudioFeatures] = None
     lyrics: Optional[LyricsData] = None
+    youtube: Optional[YoutubeData] = None  # v3: linked YouTube video
 
     # ── MusicBrainz enrichment (v2) ───────────────────────────────────────────
     musicbrainz: Optional[MusicBrainzData] = None

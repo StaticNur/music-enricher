@@ -25,6 +25,12 @@ ARTIST_QUEUE_COL = "artist_queue"
 GENRE_QUEUE_COL = "genre_queue"
 REGIONAL_SEED_QUEUE_COL = "regional_seed_queue"   # v2
 
+# v3: external-source discovery
+TRACK_CANDIDATES_COL = "track_candidates"
+LASTFM_SEED_QUEUE_COL = "lastfm_seed_queue"
+YTMUSIC_SEED_QUEUE_COL = "ytmusic_seed_queue"
+DISCOGS_SEED_QUEUE_COL = "discogs_seed_queue"
+
 
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
     """
@@ -36,6 +42,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type
     await _ensure_track_indexes(db)
     await _ensure_artist_indexes(db)
     await _ensure_queue_indexes(db)
+    await _ensure_v3_indexes(db)
     logger.info("indexes_ensured")
 
 
@@ -159,4 +166,52 @@ async def _ensure_queue_indexes(db: AsyncIOMotorDatabase) -> None:  # type: igno
         ),
         IndexModel([("status", ASCENDING)], name="status_idx"),
         IndexModel([("region", ASCENDING), ("status", ASCENDING)], name="region_status_idx"),
+    ])
+
+
+async def _ensure_v3_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Create indexes for v3 external-source discovery collections."""
+
+    # track_candidates — the staging area before Spotify matching
+    cand_col = db[TRACK_CANDIDATES_COL]
+    await cand_col.create_indexes([
+        # Primary deduplication key for candidates
+        IndexModel(
+            [("candidate_fingerprint", ASCENDING)],
+            unique=True, name="candidate_fingerprint_unique",
+        ),
+        # candidate_match_worker polling: unprocessed, not locked
+        IndexModel(
+            [("processed", ASCENDING), ("locked_at", ASCENDING)],
+            name="processed_locked_idx",
+        ),
+        IndexModel([("source", ASCENDING)], name="source_idx"),
+        IndexModel([("discovered_at", DESCENDING)], name="discovered_at_idx"),
+    ])
+
+    # lastfm_seed_queue — (tag, method) is the unique key
+    lf_col = db[LASTFM_SEED_QUEUE_COL]
+    await lf_col.create_indexes([
+        IndexModel(
+            [("tag", ASCENDING), ("method", ASCENDING)],
+            unique=True, name="tag_method_unique",
+        ),
+        IndexModel([("status", ASCENDING)], name="status_idx"),
+    ])
+
+    # ytmusic_seed_queue — (query_type, query) is the unique key
+    yt_col = db[YTMUSIC_SEED_QUEUE_COL]
+    await yt_col.create_indexes([
+        IndexModel(
+            [("query_type", ASCENDING), ("query", ASCENDING)],
+            unique=True, name="query_type_query_unique",
+        ),
+        IndexModel([("status", ASCENDING)], name="status_idx"),
+    ])
+
+    # discogs_seed_queue — style is the unique key (page tracked in document)
+    dc_col = db[DISCOGS_SEED_QUEUE_COL]
+    await dc_col.create_indexes([
+        IndexModel([("style", ASCENDING)], unique=True, name="style_unique"),
+        IndexModel([("status", ASCENDING)], name="status_idx"),
     ])

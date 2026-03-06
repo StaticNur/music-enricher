@@ -51,6 +51,11 @@ WORKER_TYPES = {
     "regional_seed_worker",
     "language_worker",
     "transliteration_worker",
+    # v3 external-source discovery
+    "lastfm_worker",
+    "ytmusic_worker",
+    "discogs_worker",
+    "candidate_match_worker",
 }
 
 
@@ -131,6 +136,28 @@ async def _run_worker(worker_type: str) -> None:
         elif worker_type == "transliteration_worker":
             from app.workers.transliteration_worker import TransliterationWorker
             worker = TransliterationWorker(db, settings)
+            await worker.run()
+
+        # ── v3: external-source discovery workers ─────────────────────────────
+
+        elif worker_type == "lastfm_worker":
+            from app.workers.lastfm_worker import LastFmWorker
+            worker = LastFmWorker(db, settings)
+            await worker.run()
+
+        elif worker_type == "ytmusic_worker":
+            from app.workers.ytmusic_worker import YtMusicWorker
+            worker = YtMusicWorker(db, settings)
+            await worker.run()
+
+        elif worker_type == "discogs_worker":
+            from app.workers.discogs_worker import DiscogsWorker
+            worker = DiscogsWorker(db, settings)
+            await worker.run()
+
+        elif worker_type == "candidate_match_worker":
+            from app.workers.candidate_match_worker import CandidateMatchWorker
+            worker = CandidateMatchWorker(db, settings)
             await worker.run()
 
         else:

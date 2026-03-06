@@ -39,3 +39,7 @@ transliterate>=1.10.2
 
 # Unicode normalization helpers (for Arabic/CJK text)
 unicodedata2>=15.1.0
+
+# v3: external-source discovery
+# YouTube Music API (no auth required for public search/charts)
+ytmusicapi>=1.7.0

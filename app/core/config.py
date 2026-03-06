@@ -96,6 +96,26 @@ class Settings(BaseSettings):
     # ── Transliteration ───────────────────────────────────────────────────────
     transliteration_enabled: bool = Field(default=True)
 
+    # ── Last.fm API (v3) ──────────────────────────────────────────────────────
+    lastfm_api_key: str = Field(default="")
+    lastfm_rate_limit_rps: float = Field(default=4.0)
+    lastfm_max_retries: int = Field(default=3)
+    lastfm_max_pages: int = Field(default=200)   # max pages per tag (50 tracks/page)
+
+    # ── YouTube Music (v3) ────────────────────────────────────────────────────
+    ytmusic_rate_limit_rps: float = Field(default=10.0)
+    ytmusic_max_retries: int = Field(default=3)
+
+    # ── Discogs API (v3) ──────────────────────────────────────────────────────
+    discogs_token: str = Field(default="")
+    # Discogs: 60 req/min authenticated = 1 req/s
+    discogs_rate_limit_rps: float = Field(default=1.0)
+    discogs_max_retries: int = Field(default=3)
+    discogs_max_pages: int = Field(default=100)  # max pages per style
+
+    # ── Candidate matching (v3) ───────────────────────────────────────────────
+    candidate_match_confidence: float = Field(default=0.8)  # min Spotify match score
+
     @property
     def target_regions_list(self) -> list[str]:
         """Parse comma-separated target_regions into a list."""

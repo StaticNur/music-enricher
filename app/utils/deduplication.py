@@ -85,3 +85,37 @@ def extract_isrc(track_data: dict) -> Optional[str]:
         ISRC string or ``None`` if not present.
     """
     return track_data.get("external_ids", {}).get("isrc") or None
+
+
+def compute_candidate_fingerprint(
+    title: str,
+    artist: str,
+    duration_ms: Optional[int] = None,
+) -> str:
+    """
+    Compute a deduplication fingerprint for an external candidate track.
+
+    Used when we don't yet have a Spotify artist ID, so we normalize both
+    title and artist name instead.
+
+    Primary (with duration):
+        sha256(normalized_title | normalized_artist | duration_bucket)
+    Fallback (no duration):
+        sha256(normalized_title | normalized_artist)
+
+    Args:
+        title: Track title (will be normalized).
+        artist: Primary artist name (will be normalized).
+        duration_ms: Duration in milliseconds, or ``None`` if unavailable.
+
+    Returns:
+        Hex-encoded SHA-256 digest (64 characters).
+    """
+    normalized_title = normalize_text(title)
+    normalized_artist = normalize_text(artist)
+    if duration_ms:
+        bucketed = duration_bucket(duration_ms)
+        raw = f"{normalized_title}|{normalized_artist}|{bucketed}"
+    else:
+        raw = f"{normalized_title}|{normalized_artist}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()

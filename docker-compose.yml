@@ -112,6 +112,47 @@ services:
     deploy:
       replicas: 1
 
+  # ════════════════════════════════════════════════
+  # v3: External-Source Discovery Workers
+  # ════════════════════════════════════════════════
+
+  # ── Last.fm Discovery Worker ──────────────────
+  # Self-seeding: populates lastfm_seed_queue on first run,
+  # then paginates through tag.getTopTracks / chart.getTopTracks.
+  # Candidates land in track_candidates for Spotify matching.
+  lastfm-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: lastfm_worker
+
+  # ── YouTube Music Discovery Worker ────────────
+  # Self-seeding: discovers tracks from YTMusic search + charts.
+  # Stores youtube_video_id alongside candidate for later download.
+  ytmusic-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: ytmusic_worker
+
+  # ── Discogs Discovery Worker ──────────────────
+  # Self-seeding: searches Discogs by genre style.
+  # Strict 1 req/s rate limit enforced in code.
+  # DO NOT run multiple replicas — Discogs will throttle / ban.
+  discogs-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: discogs_worker
+    deploy:
+      replicas: 1
+
+  # ── Candidate Match Worker ────────────────────
+  # Reads from track_candidates, searches Spotify, inserts
+  # matched tracks into tracks collection as base_collected.
+  # Horizontally scalable — optimistic locking prevents conflicts.
+  candidate-match-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: candidate_match_worker
+
 networks:
   telegram-bot-network:
     external: true
