@@ -183,9 +183,7 @@ class YoutubeEnrichmentWorker(BaseWorker):
         if not video_id:
             return None
 
-        result_title = normalize_text(
-            (raw.get("title") or "")
-        )
+        result_title = normalize_text(raw.get("title") or "")
         result_artists = raw.get("artists") or []
         result_artist = normalize_text(
             result_artists[0].get("name", "") if result_artists else ""
@@ -194,8 +192,16 @@ class YoutubeEnrichmentWorker(BaseWorker):
         norm_title = normalize_text(title)
         norm_artist = normalize_text(artist)
 
-        title_sim = fuzz.token_sort_ratio(norm_title, result_title) / 100.0
-        artist_sim = fuzz.token_sort_ratio(norm_artist, result_artist) / 100.0
+        # Use max(token_sort, token_set) for better recall:
+        # token_set handles "The Weeknd" vs "Weeknd", remastered suffix variants, etc.
+        title_sim = max(
+            fuzz.token_sort_ratio(norm_title, result_title),
+            fuzz.token_set_ratio(norm_title, result_title),
+        ) / 100.0
+        artist_sim = max(
+            fuzz.token_sort_ratio(norm_artist, result_artist),
+            fuzz.token_set_ratio(norm_artist, result_artist),
+        ) / 100.0
         confidence = 0.6 * title_sim + 0.4 * artist_sim
 
         if confidence < self.settings.ytmusic_video_match_confidence:

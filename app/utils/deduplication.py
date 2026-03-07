@@ -18,23 +18,50 @@ from typing import Optional
 
 _WHITESPACE_RE = re.compile(r"\s+")
 
+# Parenthetical/bracketed edition tags to strip from titles
+_EDITION_RE = re.compile(
+    r"\s*[\(\[](remaster(ed)?(\s+\d{4})?|live(\s+version)?|radio\s+edit|explicit|"
+    r"clean(\s+version)?|version|edit|mix|remix|original(\s+mix)?|mono|stereo|"
+    r"single(\s+version)?|album(\s+version)?|extended(\s+mix)?|acoustic|"
+    r"official\s+(video|audio|lyrics?|music\s+video)|lyrics?|"
+    r"visuali[sz]er|hq|hd|4k|full\s+version|bonus\s+track|\d{4}\s+remaster|\d{4}).*?[\)\]]",
+    flags=re.IGNORECASE,
+)
+
+# feat./ft./featuring/with anywhere in the string (including without parens at end of line)
+_FEAT_RE = re.compile(
+    r"\s*[\(\[]?(feat\.?|ft\.?|featuring|prod\.?\s+by)\s+[^\)\]]+[\)\]]?",
+    flags=re.IGNORECASE,
+)
+
+# Leading track-number prefix: "01. ", "1 - ", "02 " etc.
+_TRACK_NUM_RE = re.compile(r"^\d{1,3}[\.\-\s]\s*")
+
+# Collapse non-alphanumeric characters to a space (keeps spaces/letters/digits)
+_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+
 
 def normalize_text(text: str) -> str:
     """
-    Lowercase, strip, and collapse whitespace.
+    Canonical normalization for music track/artist names.
 
-    Removes common parenthetical suffixes like "(Remastered)", "(Live)", etc.
-    to improve matching across editions of the same recording.
+    Steps applied in order:
+    1. Strip edition tags: (Remastered), [Live], (Official Video), etc.
+    2. Strip feat./ft./featuring and everything after.
+    3. Strip leading track-number prefixes: "01. ", "1 - ".
+    4. Lowercase.
+    5. Replace punctuation with spaces.
+    6. Collapse whitespace.
+
+    Used for both fingerprint computation and fuzzy-match scoring, so it must
+    produce a stable, idempotent canonical form.
     """
-    # Strip remaster/live/radio edit suffixes
-    text = re.sub(
-        r"\s*[\(\[](remaster(ed)?|live|radio edit|explicit|clean|version|edit|mix|remix).*?[\)\]]",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = text.lower().strip()
-    text = _WHITESPACE_RE.sub(" ", text)
+    text = _EDITION_RE.sub("", text)
+    text = _FEAT_RE.sub("", text)
+    text = _TRACK_NUM_RE.sub("", text)
+    text = text.lower()
+    text = _PUNCT_RE.sub(" ", text)
+    text = _WHITESPACE_RE.sub(" ", text).strip()
     return text
 
 

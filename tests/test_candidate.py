@@ -4,6 +4,7 @@ Tests for candidate-related utilities and parsing helpers.
 Run with:
     python -m pytest tests/ -v
 """
+import asyncio
 import pytest
 
 from app.utils.deduplication import (
@@ -11,9 +12,60 @@ from app.utils.deduplication import (
     compute_fingerprint,
     normalize_text,
 )
+from app.utils.circuit_breaker import CircuitBreaker, CircuitBreakerOpen, CircuitState
 from app.services.lastfm import LastFmClient
 from app.services.ytmusic import YtMusicClient, _parse_duration_string
 from app.services.discogs import DiscogsClient, _parse_discogs_duration
+
+
+# ── normalize_text ─────────────────────────────────────────────────────────────
+
+class TestNormalizeText:
+    def test_lowercase_and_strip(self):
+        assert normalize_text("  Hello World  ") == "hello world"
+
+    def test_remaster_stripped(self):
+        assert normalize_text("Song (Remastered)") == "song"
+        assert normalize_text("Song (Remastered 2019)") == "song"
+        assert normalize_text("Song [2019 Remaster]") == "song"
+
+    def test_live_version_stripped(self):
+        assert normalize_text("Song (Live)") == "song"
+        assert normalize_text("Song [Live Version]") == "song"
+
+    def test_official_video_stripped(self):
+        assert normalize_text("Song (Official Video)") == "song"
+        assert normalize_text("Song (Official Audio)") == "song"
+        assert normalize_text("Song [Lyrics Video]") == "song"
+
+    def test_feat_stripped_parens(self):
+        assert normalize_text("Shape of You (feat. Zara Larsson)") == "shape of you"
+
+    def test_feat_stripped_no_parens(self):
+        assert normalize_text("Song feat. Someone Else") == "song"
+
+    def test_ft_stripped(self):
+        assert normalize_text("Song ft. Artist") == "song"
+
+    def test_featuring_stripped(self):
+        assert normalize_text("Song featuring Artist") == "song"
+
+    def test_track_number_prefix_stripped(self):
+        assert normalize_text("01. Song Title") == "song title"
+        assert normalize_text("1 - Song Title") == "song title"
+        assert normalize_text("12 Song Title") == "song title"
+
+    def test_punctuation_normalized(self):
+        # Hyphens, apostrophes etc. become spaces then collapsed
+        assert normalize_text("Jay-Z") == "jay z"
+        assert normalize_text("It's A Man's World") == "it s a man s world"
+
+    def test_idempotent(self):
+        result = normalize_text("Song (feat. X) [Remastered]")
+        assert normalize_text(result) == result
+
+    def test_empty_string(self):
+        assert normalize_text("") == ""
 
 
 # ── deduplication ─────────────────────────────────────────────────────────────
@@ -57,6 +109,11 @@ class TestComputeCandidateFingerprint:
         fp2 = compute_candidate_fingerprint("Song", "Artist")
         assert fp1 == fp2
 
+    def test_feat_suffix_stripped(self):
+        fp1 = compute_candidate_fingerprint("Song (feat. Other Artist)", "Artist")
+        fp2 = compute_candidate_fingerprint("Song", "Artist")
+        assert fp1 == fp2
+
     def test_returns_64_char_hex(self):
         fp = compute_candidate_fingerprint("Title", "Artist", 150000)
         assert len(fp) == 64
@@ -68,6 +125,74 @@ class TestComputeCandidateFingerprint:
         fp_candidate = compute_candidate_fingerprint("Song", "Artist Name", 200000)
         fp_spotify = compute_fingerprint("Song", "artist_spotify_id_abc", 200000)
         assert fp_candidate != fp_spotify
+
+
+# ── circuit breaker ───────────────────────────────────────────────────────────
+
+class TestCircuitBreaker:
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    def test_initial_state_closed(self):
+        cb = CircuitBreaker("test", failure_threshold=3, recovery_timeout=60)
+        assert cb.state == CircuitState.CLOSED
+
+    def test_opens_after_threshold_failures(self):
+        cb = CircuitBreaker("test", failure_threshold=3, recovery_timeout=60)
+
+        async def _test():
+            for _ in range(3):
+                await cb.record_failure()
+            assert cb.state == CircuitState.OPEN
+
+        self._run(_test())
+
+    def test_check_raises_when_open(self):
+        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=9999)
+
+        async def _test():
+            await cb.record_failure()
+            with pytest.raises(CircuitBreakerOpen):
+                await cb.check()
+
+        self._run(_test())
+
+    def test_success_decrements_failures(self):
+        cb = CircuitBreaker("test", failure_threshold=5, recovery_timeout=60)
+
+        async def _test():
+            await cb.record_failure()
+            await cb.record_failure()
+            assert cb._failures == 2
+            await cb.record_success()
+            assert cb._failures == 1
+
+        self._run(_test())
+
+    def test_half_open_probe_success_closes(self):
+        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.0)
+
+        async def _test():
+            await cb.record_failure()
+            assert cb.state == CircuitState.OPEN
+            # With recovery_timeout=0 the next check should transition to HALF_OPEN
+            await asyncio.sleep(0.01)
+            await cb.check()  # transitions to HALF_OPEN, does not raise
+            await cb.record_success()
+            assert cb.state == CircuitState.CLOSED
+
+        self._run(_test())
+
+    def test_does_not_open_before_threshold(self):
+        cb = CircuitBreaker("test", failure_threshold=5, recovery_timeout=60)
+
+        async def _test():
+            for _ in range(4):
+                await cb.record_failure()
+            assert cb.state == CircuitState.CLOSED
+            await cb.check()  # must not raise
+
+        self._run(_test())
 
 
 # ── Last.fm parsing ───────────────────────────────────────────────────────────

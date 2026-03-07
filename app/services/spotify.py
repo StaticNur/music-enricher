@@ -32,6 +32,7 @@ from tenacity import (
 )
 
 from app.core.config import Settings
+from app.utils.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 from app.utils.rate_limiter import RateLimiter
 
 logger = structlog.get_logger(__name__)
@@ -106,6 +107,11 @@ class SpotifyClient:
             rate=settings.spotify_rate_limit_rps,
             capacity=settings.spotify_rate_limit_rps,
         )
+        self._circuit = CircuitBreaker(
+            name="spotify",
+            failure_threshold=settings.spotify_circuit_breaker_threshold,
+            recovery_timeout=settings.spotify_circuit_breaker_timeout,
+        )
         self._http = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0),
             limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
@@ -124,52 +130,71 @@ class SpotifyClient:
 
     async def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         """
-        Execute a GET request with rate limiting.
+        Execute a GET request with rate limiting and circuit breaker protection.
 
+        Circuit breaker opens after repeated 429/5xx/network errors.
+        Client errors (401, 403, 404) do NOT count as breaker failures because
+        they reflect caller mistakes or deprecated endpoints, not service health.
+
+        Raises ``CircuitBreakerOpen`` when the circuit is OPEN — callers should
+        immediately fall back to an alternative source without any I/O.
         Raises ``SpotifyRateLimit`` on 429 so tenacity can retry.
-        Raises ``SpotifyError`` on other 4xx/5xx.
+        Raises ``SpotifyError`` on unrecoverable 4xx/5xx.
         """
         await self._limiter.acquire()
-        token = await self._token_manager.get_token(self._http)
-        url = f"{BASE_URL}{path}"
-        resp = await self._http.get(
-            url,
-            params=params,
-            headers={"Authorization": f"Bearer {token}"},
-        )
 
-        if resp.status_code == 429:
-            retry_after = int(resp.headers.get("Retry-After", "1"))
-            sleep_for = min(retry_after, self._settings.spotify_max_rate_limit_sleep)
-            logger.warning(
-                "spotify_rate_limited",
-                retry_after=retry_after,
-                sleeping_for=sleep_for,
+        # Fast-fail if Spotify is known to be down
+        await self._circuit.check()
+
+        try:
+            token = await self._token_manager.get_token(self._http)
+            url = f"{BASE_URL}{path}"
+            resp = await self._http.get(
+                url,
+                params=params,
+                headers={"Authorization": f"Bearer {token}"},
             )
-            await asyncio.sleep(sleep_for)
-            raise SpotifyRateLimit(retry_after)
 
-        if resp.status_code in (401, 403):
-            # Token might have expired concurrently — force refresh next call
-            self._token_manager._expires_at = 0.0
-            if resp.status_code == 403:
-                # Some endpoints are deprecated / restricted
-                raise SpotifyError(403, resp.text[:200])
-            raise SpotifyError(401, "Unauthorized")
+            if resp.status_code == 429:
+                retry_after = int(resp.headers.get("Retry-After", "1"))
+                sleep_for = min(retry_after, self._settings.spotify_max_rate_limit_sleep)
+                logger.warning(
+                    "spotify_rate_limited",
+                    retry_after=retry_after,
+                    sleeping_for=sleep_for,
+                )
+                await asyncio.sleep(sleep_for)
+                await self._circuit.record_failure()
+                raise SpotifyRateLimit(retry_after)
 
-        if resp.status_code == 404:
-            raise SpotifyError(404, f"Not found: {url}")
+            if resp.status_code in (401, 403):
+                # Token might have expired concurrently — force refresh next call
+                self._token_manager._expires_at = 0.0
+                # 401/403 are auth/permission issues, not service health — no breaker hit
+                if resp.status_code == 403:
+                    raise SpotifyError(403, resp.text[:200])
+                raise SpotifyError(401, "Unauthorized")
 
-        if resp.status_code >= 500:
-            raise SpotifyError(resp.status_code, f"Server error: {resp.text[:200]}")
+            if resp.status_code == 404:
+                # Resource missing — not a service failure
+                raise SpotifyError(404, f"Not found: {url}")
 
-        if not resp.is_success:
-            raise SpotifyError(resp.status_code, resp.text[:200])
+            if resp.status_code >= 500:
+                await self._circuit.record_failure()
+                raise SpotifyError(resp.status_code, f"Server error: {resp.text[:200]}")
 
-        return resp.json()
+            if not resp.is_success:
+                raise SpotifyError(resp.status_code, resp.text[:200])
+
+            await self._circuit.record_success()
+            return resp.json()
+
+        except (httpx.TransportError, httpx.TimeoutException):
+            await self._circuit.record_failure()
+            raise
 
     def _retry(self, func):  # type: ignore[no-untyped-def]
-        """Decorator: retry on transient errors."""
+        """Decorator: retry on transient errors. CircuitBreakerOpen is NOT retried."""
         return retry(
             retry=retry_if_exception_type((SpotifyRateLimit, httpx.TransportError, httpx.TimeoutException)),
             stop=stop_after_attempt(self._settings.spotify_max_retries),

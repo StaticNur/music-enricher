@@ -49,9 +49,29 @@ class YtMusicClient:
         self._max_retries = settings.ytmusic_max_retries
         self._limiter = RateLimiter(rate=self._rate, capacity=self._rate * 2)
         self._yt: Optional[Any] = None  # ytmusicapi.YTMusic instance
+        self._init_lock = asyncio.Lock()  # guards lazy init against concurrent callers
+
+    async def _ensure_client(self) -> None:
+        """
+        Lazily initialise the ytmusicapi client exactly once, even when multiple
+        coroutines call it concurrently on the first iteration.
+        """
+        if self._yt is not None:
+            return
+        async with self._init_lock:
+            if self._yt is not None:  # re-check inside lock (double-checked locking)
+                return
+            try:
+                from ytmusicapi import YTMusic  # type: ignore[import-untyped]
+                loop = asyncio.get_running_loop()
+                self._yt = await loop.run_in_executor(None, YTMusic)
+                logger.info("ytmusic_client_initialized")
+            except Exception as exc:
+                logger.error("ytmusic_client_init_failed", error=str(exc))
+                raise YtMusicError(f"YTMusic init failed: {exc}") from exc
 
     def _init_client(self) -> None:
-        """Lazy-init the ytmusicapi client (import is slow)."""
+        """Kept for backwards compatibility; prefer ``_ensure_client()``."""
         if self._yt is None:
             try:
                 from ytmusicapi import YTMusic  # type: ignore[import-untyped]
@@ -75,9 +95,10 @@ class YtMusicClient:
         Run a synchronous ytmusicapi call in the thread-pool executor.
 
         Applies rate limiting before dispatching.
+        Uses ``get_running_loop()`` (Python 3.10+ preferred API).
         """
         await self._limiter.acquire()
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
 
     # ── Public API methods ─────────────────────────────────────────────────────
@@ -89,7 +110,7 @@ class YtMusicClient:
         Returns a list of raw ytmusicapi result dicts.
         Empty list on any error so the worker can continue.
         """
-        self._init_client()
+        await self._ensure_client()
 
         async def _fetch() -> List[Dict[str, Any]]:
             assert self._yt is not None
@@ -118,7 +139,7 @@ class YtMusicClient:
 
         The caller is responsible for confidence-scoring the result.
         """
-        self._init_client()
+        await self._ensure_client()
         query = f"{artist} {title} official audio"
 
         async def _fetch() -> List[Dict[str, Any]]:
@@ -144,7 +165,7 @@ class YtMusicClient:
 
         Returns the raw ytmusicapi chart dict, or ``{}`` on error.
         """
-        self._init_client()
+        await self._ensure_client()
 
         async def _fetch() -> Dict[str, Any]:
             assert self._yt is not None

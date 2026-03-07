@@ -49,6 +49,7 @@ from app.models.track import (
 )
 from app.services.deezer import DeezerClient
 from app.services.spotify import SpotifyClient, SpotifyError
+from app.utils.circuit_breaker import CircuitBreakerOpen
 from app.utils.deduplication import (
     compute_candidate_fingerprint,
     compute_fingerprint,
@@ -60,6 +61,25 @@ from app.workers.base import BaseWorker, WORKER_INSTANCE_ID, LOCK_TIMEOUT_SECOND
 logger = structlog.get_logger(__name__)
 
 _SEARCH_LIMIT = 5  # candidates to score per search query
+
+
+def _str_similarity(s1: str, s2: str) -> float:
+    """
+    Best fuzzy similarity across token_sort and token_set algorithms.
+
+    - ``token_sort_ratio``: sorts tokens alphabetically before comparing —
+      good for reordered words ("John Lennon" vs "Lennon John").
+    - ``token_set_ratio``: uses set intersection — good when one string is a
+      strict subset ("The Beatles" vs "Beatles", "Drake" vs "Drake feat. X").
+
+    Returns float in [0, 1].
+    """
+    if not s1 or not s2:
+        return 0.0
+    return max(
+        fuzz.token_sort_ratio(s1, s2),
+        fuzz.token_set_ratio(s1, s2),
+    ) / 100.0
 
 
 class CandidateMatchWorker(BaseWorker):
@@ -170,14 +190,22 @@ class CandidateMatchWorker(BaseWorker):
 
             # ── 1. Try Spotify ────────────────────────────────────────────────
             if self._spotify is not None:
-                spotify_raw = await self._find_spotify_match(title, artist)
+                spotify_raw = await self._find_spotify_match(
+                    title, artist,
+                    candidate_isrc=isrc,
+                    candidate_duration_ms=duration_ms_c,
+                )
                 if spotify_raw is not None:
                     track_doc = self._parse_spotify_track(spotify_raw)
                     match_source = "spotify"
 
             # ── 2. Fallback to Deezer ─────────────────────────────────────────
             if track_doc is None and self._deezer is not None:
-                deezer_raw = await self._find_deezer_match(title, artist)
+                deezer_raw = await self._find_deezer_match(
+                    title, artist,
+                    candidate_isrc=isrc,
+                    candidate_duration_ms=duration_ms_c,
+                )
                 if deezer_raw is not None:
                     track_doc = self._parse_deezer_track(deezer_raw)
                     match_source = "deezer"
@@ -255,64 +283,184 @@ class CandidateMatchWorker(BaseWorker):
         items: List[Dict[str, Any]],
         get_title: Any,
         get_artist: Any,
+        *,
+        candidate_isrc: Optional[str] = None,
+        candidate_duration_ms: Optional[int] = None,
+        get_isrc: Optional[Any] = None,
+        get_duration: Optional[Any] = None,
     ) -> tuple[Optional[Dict[str, Any]], float]:
-        """Score a list of search results and return (best_item, best_score)."""
+        """
+        Score a list of search results and return (best_item, best_confidence).
+
+        Scoring:
+          base = 0.60 * title_similarity + 0.40 * artist_similarity
+
+        Similarity uses max(token_sort_ratio, token_set_ratio) so "The Beatles"
+        matches "Beatles" and reordered tokens match correctly.
+
+        Bonuses/penalties applied to base score:
+          +0.05  duration within 5 % of candidate (strong signal of same recording)
+          -0.05  duration differs by more than 25 % (likely different edit)
+
+        ISRC fast-path: if candidate and result share the same ISRC, immediately
+        return score=1.0 without fuzzy comparison.
+        """
         threshold = self.settings.candidate_match_confidence
         best: Optional[Dict[str, Any]] = None
         best_score = 0.0
+
         for item in items:
-            t_sim = fuzz.token_sort_ratio(norm_title, normalize_text(get_title(item))) / 100.0
-            a_sim = fuzz.token_sort_ratio(norm_artist, normalize_text(get_artist(item))) / 100.0
+            # ISRC exact match — highest possible confidence
+            if get_isrc is not None and candidate_isrc:
+                item_isrc = get_isrc(item)
+                if item_isrc and item_isrc.upper() == candidate_isrc.upper():
+                    return item, 1.0
+
+            t_sim = _str_similarity(norm_title, normalize_text(get_title(item)))
+            a_sim = _str_similarity(norm_artist, normalize_text(get_artist(item)))
             score = 0.6 * t_sim + 0.4 * a_sim
+
+            # Duration bonus/penalty — only when both sides have duration
+            if get_duration is not None and candidate_duration_ms and candidate_duration_ms > 0:
+                item_dur = get_duration(item)
+                if item_dur and item_dur > 0:
+                    ratio = min(candidate_duration_ms, item_dur) / max(candidate_duration_ms, item_dur)
+                    if ratio >= 0.95:
+                        score = min(1.0, score + 0.05)
+                    elif ratio < 0.75:
+                        score = max(0.0, score - 0.05)
+
             if score > best_score:
                 best_score = score
                 best = item
+
         if best is None or best_score < threshold:
             return None, best_score
         return best, best_score
 
     async def _find_spotify_match(
-        self, title: str, artist: str
+        self,
+        title: str,
+        artist: str,
+        *,
+        candidate_isrc: Optional[str] = None,
+        candidate_duration_ms: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Search Spotify, return best-matching track dict or ``None``."""
+        """
+        Search Spotify for the best-matching track.
+
+        Strategy (in order):
+          1. ISRC direct search (``isrc:{code}``) — returns score=1.0 on match.
+          2. Structured query (``track:{title} artist:{artist}``) — precise.
+          3. Simple fallback (``{artist} {title}``) — if structured returns nothing.
+
+        Falls back to ``None`` on SpotifyError or CircuitBreakerOpen so the
+        caller can try Deezer without raising.
+        """
         assert self._spotify is not None
-        query = f"{artist} {title}"
+        norm_title = normalize_text(title)
+        norm_artist = normalize_text(artist)
+
+        def _get_items(resp: Dict[str, Any]) -> List[Dict[str, Any]]:
+            return [i for i in (resp.get("tracks", {}).get("items") or []) if i and i.get("id")]
+
+        def _score(items: List[Dict[str, Any]]) -> tuple[Optional[Dict[str, Any]], float]:
+            return self._best_match(
+                norm_title, norm_artist, items,
+                get_title=lambda i: i.get("name") or "",
+                get_artist=lambda i: (i.get("artists") or [{}])[0].get("name") or "",
+                candidate_isrc=candidate_isrc,
+                candidate_duration_ms=candidate_duration_ms,
+                get_isrc=lambda i: (i.get("external_ids") or {}).get("isrc"),
+                get_duration=lambda i: i.get("duration_ms"),
+            )
+
+        # ── 1. ISRC direct search ─────────────────────────────────────────────
+        if candidate_isrc:
+            try:
+                resp = await self._spotify.search_tracks(
+                    f"isrc:{candidate_isrc}", limit=1
+                )
+                items = _get_items(resp)
+                if items:
+                    logger.debug(
+                        "candidate_matched_spotify_isrc",
+                        isrc=candidate_isrc, title=title, artist=artist,
+                    )
+                    return items[0]
+            except (SpotifyError, CircuitBreakerOpen) as exc:
+                logger.debug("spotify_isrc_search_skipped", isrc=candidate_isrc, error=str(exc))
+
+        # ── 2. Structured query: track: + artist: operators ───────────────────
+        structured_query = f"track:{norm_title} artist:{norm_artist}"
         try:
-            resp = await self._spotify.search_tracks(query, limit=_SEARCH_LIMIT)
-        except SpotifyError as exc:
-            logger.warning("spotify_search_error", query=query, error=str(exc))
+            resp = await self._spotify.search_tracks(structured_query, limit=_SEARCH_LIMIT)
+            items = _get_items(resp)
+        except (SpotifyError, CircuitBreakerOpen) as exc:
+            logger.warning("spotify_search_error", query=structured_query, error=str(exc))
             return None
 
-        items = [i for i in (resp.get("tracks", {}).get("items") or []) if i and i.get("id")]
-        if not items:
+        if items:
+            best, score = _score(items)
+            if best:
+                logger.debug(
+                    "candidate_matched_spotify",
+                    title=title, artist=artist,
+                    confidence=round(score, 3), strategy="structured",
+                )
+                return best
+
+        # ── 3. Simple fallback: "{artist} {title}" ────────────────────────────
+        simple_query = f"{norm_artist} {norm_title}"
+        try:
+            resp = await self._spotify.search_tracks(simple_query, limit=_SEARCH_LIMIT)
+            items = _get_items(resp)
+        except (SpotifyError, CircuitBreakerOpen) as exc:
+            logger.debug("spotify_fallback_search_error", query=simple_query, error=str(exc))
             return None
 
-        best, score = self._best_match(
-            normalize_text(title), normalize_text(artist), items,
-            get_title=lambda i: i.get("name") or "",
-            get_artist=lambda i: (i.get("artists") or [{}])[0].get("name") or "",
-        )
+        best, score = _score(items)
         if best:
-            logger.debug("candidate_matched_spotify", title=title, artist=artist, confidence=round(score, 3))
+            logger.debug(
+                "candidate_matched_spotify",
+                title=title, artist=artist,
+                confidence=round(score, 3), strategy="simple_fallback",
+            )
         return best
 
     async def _find_deezer_match(
-        self, title: str, artist: str
+        self,
+        title: str,
+        artist: str,
+        *,
+        candidate_isrc: Optional[str] = None,
+        candidate_duration_ms: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """Search Deezer, return best-matching track dict or ``None``."""
         assert self._deezer is not None
-        query = f"{artist} {title}"
-        items = await self._deezer.search_tracks(query, limit=_SEARCH_LIMIT)
+        norm_title = normalize_text(title)
+        norm_artist = normalize_text(artist)
+
+        items = await self._deezer.search_tracks(
+            f"{norm_artist} {norm_title}", limit=_SEARCH_LIMIT
+        )
         if not items:
             return None
 
         best, score = self._best_match(
-            normalize_text(title), normalize_text(artist), items,
+            norm_title, norm_artist, items,
             get_title=lambda i: i.get("title") or i.get("title_short") or "",
             get_artist=lambda i: (i.get("artist") or {}).get("name") or "",
+            candidate_isrc=candidate_isrc,
+            candidate_duration_ms=candidate_duration_ms,
+            get_isrc=lambda i: i.get("isrc"),
+            get_duration=lambda i: (i.get("duration") or 0) * 1000 or None,
         )
         if best:
-            logger.debug("candidate_matched_deezer", title=title, artist=artist, confidence=round(score, 3))
+            logger.debug(
+                "candidate_matched_deezer",
+                title=title, artist=artist, confidence=round(score, 3),
+            )
         return best
 
     # ── Track parsing (mirrors playlist_worker / genre_worker pattern) ────────

@@ -33,6 +33,7 @@ from tenacity import (
 )
 
 from app.core.config import Settings
+from app.utils.deduplication import normalize_text
 from app.utils.rate_limiter import RateLimiter
 
 logger = structlog.get_logger(__name__)
@@ -188,18 +189,29 @@ class GeniusClient:
         Compute match confidence for a Genius search hit.
 
         Weighted average of:
-        - Title similarity (60%)
-        - Artist similarity (40%)
+        - Title similarity  (60%) — uses normalize_text to strip feat./remasters
+        - Artist similarity (40%) — idem
+
+        Both sides are normalized so "Shape of You (feat. Zara)" matches
+        "Shape of You" and "(Remastered 2019)" variants are not penalized.
+        Uses max(token_sort_ratio, token_set_ratio) for better recall on
+        artist names like "The Weeknd" vs "Weeknd".
         """
         result = hit.get("result", {})
-        hit_title = result.get("title", "")
-        hit_artist = result.get("primary_artist", {}).get("name", "")
+        hit_title = normalize_text(result.get("title", ""))
+        hit_artist = normalize_text(
+            result.get("primary_artist", {}).get("name", "")
+        )
+        norm_track = normalize_text(track_name)
+        norm_artist = normalize_text(artist_name)
 
-        title_score = fuzz.token_sort_ratio(
-            track_name.lower(), hit_title.lower()
+        title_score = max(
+            fuzz.token_sort_ratio(norm_track, hit_title),
+            fuzz.token_set_ratio(norm_track, hit_title),
         ) / 100.0
-        artist_score = fuzz.token_sort_ratio(
-            artist_name.lower(), hit_artist.lower()
+        artist_score = max(
+            fuzz.token_sort_ratio(norm_artist, hit_artist),
+            fuzz.token_set_ratio(norm_artist, hit_artist),
         ) / 100.0
 
         return round(0.6 * title_score + 0.4 * artist_score, 4)

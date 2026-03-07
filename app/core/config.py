@@ -6,7 +6,7 @@ No global mutable state — settings are read once at startup.
 """
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     # 20,000+ seconds when overloaded — we cap the sleep so workers don't
     # stall for hours. Tenacity's backoff handles the remaining wait.
     spotify_max_rate_limit_sleep: int = Field(default=60)
+    # Circuit breaker: open after this many consecutive 429/5xx/network errors
+    spotify_circuit_breaker_threshold: int = Field(default=5)
+    # Circuit breaker: seconds to wait in OPEN state before probing again
+    spotify_circuit_breaker_timeout: float = Field(default=120.0)
 
     # ── Genius API ───────────────────────────────────────────────────────────
     genius_access_token: str = Field(default="")
@@ -166,6 +170,21 @@ class Settings(BaseSettings):
     deezer_crawl_albums: bool = Field(default=True)
     # Max albums crawled per artist when deezer_crawl_albums=True
     deezer_max_albums_per_artist: int = Field(default=20)
+
+    @field_validator(
+        "quality_threshold",
+        "genius_min_confidence",
+        "candidate_match_confidence",
+        "musicbrainz_min_confidence",
+        "ytmusic_video_match_confidence",
+        mode="before",
+    )
+    @classmethod
+    def _validate_confidence(cls, v: float) -> float:
+        v = float(v)
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(f"Confidence/threshold must be in [0, 1], got {v}")
+        return v
 
     @property
     def target_regions_list(self) -> list[str]:
