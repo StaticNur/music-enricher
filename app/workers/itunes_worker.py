@@ -28,6 +28,7 @@ Output : tracks (status=base_collected, spotify_id="itunes:{trackId}")
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -40,7 +41,7 @@ from app.core.config import Settings
 from app.db.collections import ITUNES_SEED_QUEUE_COL, TRACKS_COL
 from app.models.track import AlbumRef, ArtistRef, TrackStatus
 from app.services.apple_music import AppleMusicClient, CHART_COUNTRIES, CHART_TYPES
-from app.utils.deduplication import compute_candidate_fingerprint
+from app.utils.deduplication import compute_candidate_fingerprint, normalize_text
 from app.workers.base import BaseWorker, LOCK_TIMEOUT_SECONDS, WORKER_INSTANCE_ID
 
 logger = structlog.get_logger(__name__)
@@ -149,10 +150,18 @@ class ItunesWorker(BaseWorker):
             name: str = doc["_id"] or ""
             if len(name) < 2:
                 continue
+            # Normalize name as the queue key so that "The Weeknd" / "WEEKND" / "Weeknd"
+            # all collapse to one queue item. iTunes Search API is case-insensitive,
+            # so querying with the lowercased name returns the same results.
+            # Existing queue items keyed on the raw name are still processed normally
+            # (claim_batch queries on processed=False, not on this field).
+            norm_key = normalize_text(name)
+            if not norm_key:
+                continue
             ops.append(UpdateOne(
-                {"artist_name": name},
+                {"artist_name": norm_key},
                 {"$setOnInsert": {
-                    "artist_name": name,
+                    "artist_name": norm_key,
                     "processed": False,
                     "locked_at": None,
                     "created_at": now,
@@ -223,9 +232,10 @@ class ItunesWorker(BaseWorker):
             artist_name: str = item.get("artist_name", "")
 
             # ── Pre-check: skip iTunes API call if artist already well-covered ──
-            # count_documents on artists.name uses the artist_name_idx index.
+            # Case-insensitive match so "WEEKND" and "Weeknd" both count against
+            # the same artist's track total. The artist_name_idx supports regex scans.
             existing = await self.db[TRACKS_COL].count_documents(
-                {"artists.name": artist_name},
+                {"artists.name": {"$regex": f"^{re.escape(artist_name)}$", "$options": "i"}},
                 limit=threshold,  # stop counting at threshold — fast
             )
             if existing >= threshold:

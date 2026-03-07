@@ -17,6 +17,7 @@ compute_candidate_fingerprint (title + artist + duration bucket).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List
 
@@ -67,10 +68,16 @@ class AppleMusicClient:
             rate=settings.itunes_rate_limit_rps,
             capacity=settings.itunes_rate_limit_rps,
         )
+        self._403_backoff_after = settings.itunes_403_backoff_after
+        self._403_backoff_seconds = settings.itunes_403_backoff_seconds
+        self._consecutive_403s = 0
         self._http = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0),
             limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
-            headers={"User-Agent": "MusicEnricher/1.0"},
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+                "Accept": "application/json"
+            },
             follow_redirects=True,  # Apple RSS feeds use 301 redirects
         )
 
@@ -117,12 +124,21 @@ class AppleMusicClient:
                 },
             )
             if resp.status_code == 429:
-                import asyncio
                 logger.warning("itunes_rate_limited", sleeping_for=15)
                 await asyncio.sleep(15)
                 raise httpx.TransportError("Rate limited")
             if resp.status_code == 403:
+                self._consecutive_403s += 1
+                if self._consecutive_403s >= self._403_backoff_after:
+                    logger.warning(
+                        "itunes_403_backoff",
+                        consecutive=self._consecutive_403s,
+                        sleeping_for=self._403_backoff_seconds,
+                    )
+                    await asyncio.sleep(self._403_backoff_seconds)
+                    self._consecutive_403s = 0
                 return []
+            self._consecutive_403s = 0
             resp.raise_for_status()
             return [
                 r for r in resp.json().get("results", [])
