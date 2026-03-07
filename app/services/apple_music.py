@@ -10,7 +10,7 @@ Two data sources — both free, no authentication required:
 
 2. **Apple Music RSS Feeds** — top chart songs per country.
    Updated regularly, no rate limit, JSON response.
-   Endpoint: https://rss.applemarketingtools.com/api/v2/{country}/music/{chart}/100/songs.json
+   Endpoint: https://rss.marketingtools.apple.com/api/v2/{country}/music/{chart}/100/songs.json
 
 Neither source provides ISRC. Deduplication falls back to
 compute_candidate_fingerprint (title + artist + duration bucket).
@@ -36,7 +36,7 @@ from app.utils.rate_limiter import RateLimiter
 logger = structlog.get_logger(__name__)
 
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
-APPLE_RSS_BASE = "https://rss.applemarketingtools.com/api/v2"
+APPLE_RSS_BASE = "https://rss.marketingtools.apple.com/api/v2"
 
 # Chart types available via Apple RSS
 CHART_TYPES = ["most-played", "hot-tracks", "new-music"]
