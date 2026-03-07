@@ -200,3 +200,38 @@ class DeezerClient:
         except Exception as exc:
             logger.debug("deezer_get_track_failed", track_id=track_id, error=str(exc))
             return None
+
+    # ── Search ────────────────────────────────────────────────────────────────
+
+    async def search_tracks(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Search tracks by free-text query (artist + title)."""
+        async def _fetch() -> List[Dict[str, Any]]:
+            data = await self._get(
+                "/search",
+                params={"q": query, "type": "track", "limit": min(limit, 50)},
+            )
+            return data.get("data", [])
+        try:
+            return await self._retry(_fetch)()
+        except Exception as exc:
+            logger.warning("deezer_search_tracks_failed", query=query, error=str(exc))
+            return []
+
+    async def get_artist_related(self, artist_id: int) -> List[Dict[str, Any]]:
+        """
+        Fetch up to 20 related artists for BFS graph expansion.
+
+        Deezer still supports this endpoint unlike Spotify, which deprecated it
+        in November 2024.
+        """
+        async def _fetch() -> List[Dict[str, Any]]:
+            data = await self._get(
+                f"/artist/{artist_id}/related",
+                params={"limit": 20},
+            )
+            return data.get("data", [])
+        try:
+            return await self._retry(_fetch)()
+        except Exception as exc:
+            logger.debug("deezer_get_related_failed", artist_id=artist_id, error=str(exc))
+            return []

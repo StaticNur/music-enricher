@@ -152,14 +152,16 @@ services:
       replicas: 1
 
   # ── Candidate Match Worker ────────────────────
-  # Reads from track_candidates, searches Spotify, inserts
-  # matched tracks into tracks collection as base_collected.
-  # Throttled to 1 rps: ~2% match rate, not worth burning Spotify quota.
+  # Searches Spotify (primary) then Deezer (fallback) for each candidate.
+  # Throttled to 1 rps Spotify: ~2% match rate, not worth burning quota.
+  # When Spotify API is cut off: set SPOTIFY_ENABLED=false — worker
+  # switches to Deezer-only search with no restart needed.
   candidate-match-worker:
     <<: *worker-common
     environment:
       WORKER_TYPE: candidate_match_worker
       SPOTIFY_RATE_LIMIT_RPS: "1"
+      # SPOTIFY_ENABLED: "false"   # ← uncomment when Spotify cuts access
 
   # ════════════════════════════════════════════════
   # v4: Artist Graph Expansion
@@ -174,6 +176,8 @@ services:
   # Expected scale: 50k–100k artists, 10M–30M tracks at depth=5.
   # 3 replicas × 5 rps = 15 rps total. Cap per replica at 5 so they
   # don't pile onto one credential — tune down if 429s reappear.
+  # When Spotify API is cut off: set replicas to 0 (fully Spotify-dependent).
+  # Discovery continues via deezer-direct-worker BFS at that point.
   artist-graph-worker:
     <<: *worker-common
     environment:

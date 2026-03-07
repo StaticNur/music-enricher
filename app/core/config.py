@@ -140,6 +140,12 @@ class Settings(BaseSettings):
     # Minimum rapidfuzz confidence to accept a YTMusic search result
     ytmusic_video_match_confidence: float = Field(default=0.65)
 
+    # ── Feature flags ────────────────────────────────────────────────────────
+    # Set to False when Spotify revokes/restricts API access.
+    # candidate_match_worker will use Deezer search exclusively.
+    # artist_graph_worker will become a no-op (no Spotify → no albums/tracks).
+    spotify_enabled: bool = Field(default=True)
+
     # ── Deezer direct discovery (v5) ─────────────────────────────────────────
     # Artists processed per worker iteration
     deezer_batch_size: int = Field(default=5)

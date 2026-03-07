@@ -2,8 +2,8 @@
 Candidate Match Worker.
 
 Reads unprocessed ``track_candidates`` (discovered by lastfm_worker,
-ytmusic_worker, discogs_worker), searches Spotify for each one, and inserts
-high-confidence matches into the main ``tracks`` collection with
+ytmusic_worker, discogs_worker), searches Spotify or Deezer for each one,
+and inserts high-confidence matches into the main ``tracks`` collection with
 ``status=base_collected``.
 
 Match scoring (weighted average):
@@ -12,6 +12,12 @@ Match scoring (weighted average):
 
 Only candidates with ``confidence >= CANDIDATE_MATCH_CONFIDENCE`` (default 0.8)
 are inserted. Others are marked processed without a track insert.
+
+Source priority:
+    1. Spotify (if ``SPOTIFY_ENABLED=true``) — returns real Spotify IDs.
+    2. Deezer search (fallback, or primary when ``SPOTIFY_ENABLED=false``) —
+       inserts with ``deezer:{id}`` placeholder; real spotify_id is backfilled
+       later by artist_graph_worker / deezer_direct_worker.
 
 When a candidate has a ``youtube_video_id`` (from ytmusic_worker), it is
 stored on the track document under the ``youtube`` sub-document.
@@ -41,8 +47,10 @@ from app.models.track import (
     AlbumRef,
     YoutubeData,
 )
+from app.services.deezer import DeezerClient
 from app.services.spotify import SpotifyClient, SpotifyError
 from app.utils.deduplication import (
+    compute_candidate_fingerprint,
     compute_fingerprint,
     extract_isrc,
     normalize_text,
@@ -51,14 +59,13 @@ from app.workers.base import BaseWorker, WORKER_INSTANCE_ID, LOCK_TIMEOUT_SECOND
 
 logger = structlog.get_logger(__name__)
 
-# Spotify search returns up to 5 candidates per query — we score all of them
-_SPOTIFY_SEARCH_LIMIT = 5
+_SEARCH_LIMIT = 5  # candidates to score per search query
 
 
 class CandidateMatchWorker(BaseWorker):
     """
-    Matches external candidates to Spotify tracks and inserts them into
-    the main enrichment pipeline.
+    Matches external candidates to Spotify (primary) or Deezer (fallback)
+    tracks and inserts them into the main enrichment pipeline.
 
     Locking: uses ``locked_at`` / ``locked_by`` on ``track_candidates``
     documents (same pattern as other workers but without a ``status`` enum —
@@ -68,14 +75,22 @@ class CandidateMatchWorker(BaseWorker):
     def __init__(self, db: AsyncIOMotorDatabase, settings: Settings) -> None:  # type: ignore[type-arg]
         super().__init__(db, settings)
         self._spotify: Optional[SpotifyClient] = None
+        self._deezer: Optional[DeezerClient] = None
 
     async def on_startup(self) -> None:
-        self._spotify = SpotifyClient(self.settings)
-        logger.info("candidate_match_worker_started")
+        if self.settings.spotify_enabled:
+            self._spotify = SpotifyClient(self.settings)
+        self._deezer = DeezerClient(self.settings)
+        logger.info(
+            "candidate_match_worker_started",
+            spotify_enabled=self.settings.spotify_enabled,
+        )
 
     async def on_shutdown(self) -> None:
         if self._spotify:
             await self._spotify.aclose()
+        if self._deezer:
+            await self._deezer.aclose()
 
     # ── Queue claiming ────────────────────────────────────────────────────────
 
@@ -123,7 +138,8 @@ class CandidateMatchWorker(BaseWorker):
 
     async def _process_candidate(self, candidate: Dict[str, Any]) -> None:
         """
-        Search Spotify for the candidate, insert if confident, mark processed.
+        Search Spotify (primary) then Deezer (fallback) for the candidate,
+        insert if confident, mark processed.
         """
         col = self.db[TRACK_CANDIDATES_COL]
         now = datetime.now(timezone.utc)
@@ -133,52 +149,62 @@ class CandidateMatchWorker(BaseWorker):
         artist: str = candidate.get("artist") or ""
 
         try:
-            assert self._spotify is not None
+            track_doc: Optional[TrackDocument] = None
+            match_source = ""
 
-            # Search Spotify
-            spotify_track = await self._find_spotify_match(title, artist)
+            # ── 1. Try Spotify ────────────────────────────────────────────────
+            if self._spotify is not None:
+                spotify_raw = await self._find_spotify_match(title, artist)
+                if spotify_raw is not None:
+                    track_doc = self._parse_spotify_track(spotify_raw)
+                    match_source = "spotify"
 
-            matched_spotify_id: Optional[str] = None
-            if spotify_track is not None:
-                track_doc = self._parse_spotify_track(spotify_track)
-                if track_doc is not None:
-                    # Attach YouTube video ID from the candidate if present
-                    youtube_video_id: Optional[str] = candidate.get("youtube_video_id")
-                    if youtube_video_id:
-                        track_doc.youtube = YoutubeData(
-                            video_id=youtube_video_id,
-                            confidence=1.0,
-                            source=(
-                                "ytmusic"
-                                if candidate.get("source") == CandidateSource.YTMUSIC.value
-                                else "search"
-                            ),
-                        )
+            # ── 2. Fallback to Deezer ─────────────────────────────────────────
+            if track_doc is None and self._deezer is not None:
+                deezer_raw = await self._find_deezer_match(title, artist)
+                if deezer_raw is not None:
+                    track_doc = self._parse_deezer_track(deezer_raw)
+                    match_source = "deezer"
 
-                    inserted = await self._upsert_track(track_doc)
-                    matched_spotify_id = track_doc.spotify_id
+            matched_id: Optional[str] = None
+            if track_doc is not None:
+                # Attach YouTube video ID from the candidate if present
+                youtube_video_id: Optional[str] = candidate.get("youtube_video_id")
+                if youtube_video_id:
+                    track_doc.youtube = YoutubeData(
+                        video_id=youtube_video_id,
+                        confidence=1.0,
+                        source=(
+                            "ytmusic"
+                            if candidate.get("source") == CandidateSource.YTMUSIC.value
+                            else "search"
+                        ),
+                    )
 
-                    if inserted:
-                        await self.increment_stat("total_discovered", 1)
-                        await self.increment_stat("total_base_collected", 1)
-                        await self.increment_stat("candidates_matched", 1)
-                        # Enqueue artists for the artist_worker to expand
+                inserted = await self._upsert_track(track_doc)
+                matched_id = track_doc.spotify_id
+
+                if inserted:
+                    await self.increment_stat("total_discovered", 1)
+                    await self.increment_stat("total_base_collected", 1)
+                    await self.increment_stat("candidates_matched", 1)
+                    # Only enqueue to artist_queue when we have a real Spotify ID
+                    if match_source == "spotify":
                         for art in track_doc.artists:
                             await self._enqueue_artist(art.spotify_id, art.name)
-                    else:
-                        # Track already exists — still store youtube_id if new
-                        if youtube_video_id:
-                            await self._maybe_set_youtube(
-                                track_doc.spotify_id, youtube_video_id,
-                                candidate.get("source", "")
-                            )
+                else:
+                    if youtube_video_id:
+                        await self._maybe_set_youtube(
+                            track_doc.spotify_id, youtube_video_id,
+                            candidate.get("source", "")
+                        )
 
             # Mark candidate as processed
             await col.update_one(
                 {"_id": candidate_id},
                 {"$set": {
                     "processed": True,
-                    "matched_spotify_id": matched_spotify_id,
+                    "matched_spotify_id": matched_id,
                     "locked_at": None,
                     "locked_by": None,
                     "updated_at": now,
@@ -204,70 +230,74 @@ class CandidateMatchWorker(BaseWorker):
                 }},
             )
 
-    # ── Spotify search + scoring ──────────────────────────────────────────────
+    # ── Search + scoring helpers ──────────────────────────────────────────────
+
+    def _best_match(
+        self,
+        norm_title: str,
+        norm_artist: str,
+        items: List[Dict[str, Any]],
+        get_title: Any,
+        get_artist: Any,
+    ) -> tuple[Optional[Dict[str, Any]], float]:
+        """Score a list of search results and return (best_item, best_score)."""
+        threshold = self.settings.candidate_match_confidence
+        best: Optional[Dict[str, Any]] = None
+        best_score = 0.0
+        for item in items:
+            t_sim = fuzz.token_sort_ratio(norm_title, normalize_text(get_title(item))) / 100.0
+            a_sim = fuzz.token_sort_ratio(norm_artist, normalize_text(get_artist(item))) / 100.0
+            score = 0.6 * t_sim + 0.4 * a_sim
+            if score > best_score:
+                best_score = score
+                best = item
+        if best is None or best_score < threshold:
+            return None, best_score
+        return best, best_score
 
     async def _find_spotify_match(
         self, title: str, artist: str
     ) -> Optional[Dict[str, Any]]:
-        """
-        Search Spotify and return the best-matching track dict, or ``None``.
-
-        Scoring weights: title 60%, artist 40%.
-        Only returns a match if ``confidence >= candidate_match_confidence``.
-        """
+        """Search Spotify, return best-matching track dict or ``None``."""
         assert self._spotify is not None
         query = f"{artist} {title}"
-        threshold = self.settings.candidate_match_confidence
-
         try:
-            resp = await self._spotify.search_tracks(
-                query, limit=_SPOTIFY_SEARCH_LIMIT
-            )
+            resp = await self._spotify.search_tracks(query, limit=_SEARCH_LIMIT)
         except SpotifyError as exc:
             logger.warning("spotify_search_error", query=query, error=str(exc))
             return None
 
-        items = resp.get("tracks", {}).get("items") or []
+        items = [i for i in (resp.get("tracks", {}).get("items") or []) if i and i.get("id")]
         if not items:
             return None
 
-        norm_title = normalize_text(title)
-        norm_artist = normalize_text(artist)
+        best, score = self._best_match(
+            normalize_text(title), normalize_text(artist), items,
+            get_title=lambda i: i.get("name") or "",
+            get_artist=lambda i: (i.get("artists") or [{}])[0].get("name") or "",
+        )
+        if best:
+            logger.debug("candidate_matched_spotify", title=title, artist=artist, confidence=round(score, 3))
+        return best
 
-        best_track: Optional[Dict[str, Any]] = None
-        best_score = 0.0
-
-        for item in items:
-            if not item or not item.get("id"):
-                continue
-
-            item_title = normalize_text(item.get("name") or "")
-            item_artist = normalize_text(
-                item.get("artists", [{}])[0].get("name", "") if item.get("artists") else ""
-            )
-
-            title_sim = fuzz.token_sort_ratio(norm_title, item_title) / 100.0
-            artist_sim = fuzz.token_sort_ratio(norm_artist, item_artist) / 100.0
-            score = 0.6 * title_sim + 0.4 * artist_sim
-
-            if score > best_score:
-                best_score = score
-                best_track = item
-
-        if best_track is None or best_score < threshold:
-            logger.debug(
-                "candidate_no_match",
-                title=title, artist=artist, best_score=round(best_score, 3),
-            )
+    async def _find_deezer_match(
+        self, title: str, artist: str
+    ) -> Optional[Dict[str, Any]]:
+        """Search Deezer, return best-matching track dict or ``None``."""
+        assert self._deezer is not None
+        query = f"{artist} {title}"
+        items = await self._deezer.search_tracks(query, limit=_SEARCH_LIMIT)
+        if not items:
             return None
 
-        logger.debug(
-            "candidate_matched",
-            title=title, artist=artist,
-            spotify_title=best_track.get("name"),
-            confidence=round(best_score, 3),
+        best, score = self._best_match(
+            normalize_text(title), normalize_text(artist), items,
+            get_title=lambda i: i.get("title") or i.get("title_short") or "",
+            get_artist=lambda i: (i.get("artist") or {}).get("name") or "",
         )
-        return best_track
+        if best:
+            logger.debug("candidate_matched_deezer", title=title, artist=artist, confidence=round(score, 3))
+        return best
 
     # ── Track parsing (mirrors playlist_worker / genre_worker pattern) ────────
 
@@ -318,6 +348,58 @@ class CandidateMatchWorker(BaseWorker):
             explicit=raw.get("explicit", False),
             markets_count=len(markets_list),
             markets=markets_list,
+            status=TrackStatus.BASE_COLLECTED,
+            appearance_score=1,
+        )
+
+    def _parse_deezer_track(self, raw: Dict[str, Any]) -> Optional[TrackDocument]:
+        """
+        Convert a raw Deezer search result into a TrackDocument.
+
+        Uses ``deezer:{id}`` placeholders — the real Spotify ID is backfilled
+        later by artist_graph_worker or deezer_direct_worker on ISRC match.
+        """
+        track_id = raw.get("id")
+        title = (raw.get("title") or raw.get("title_short") or "").strip()
+        if not track_id or not title:
+            return None
+
+        artist_raw = raw.get("artist") or {}
+        artist_name = (artist_raw.get("name") or "").strip()
+        if not artist_name:
+            return None
+
+        deezer_artist_id = artist_raw.get("id", 0)
+        artist_ref = ArtistRef(
+            spotify_id=f"deezer:{deezer_artist_id}",
+            name=artist_name,
+        )
+
+        album_raw = raw.get("album") or {}
+        album: Optional[AlbumRef] = None
+        if album_raw.get("id"):
+            album = AlbumRef(
+                spotify_id=f"deezer_album:{album_raw['id']}",
+                name=album_raw.get("title") or album_raw.get("name") or "",
+                images=[{"url": album_raw["cover"]}] if album_raw.get("cover") else [],
+            )
+
+        duration_ms = (raw.get("duration") or 0) * 1000
+        isrc: Optional[str] = raw.get("isrc") or None
+        fp = compute_candidate_fingerprint(title, artist_name, duration_ms)
+
+        return TrackDocument(
+            spotify_id=f"deezer:{track_id}",
+            isrc=isrc,
+            fingerprint=fp,
+            name=title,
+            artists=[artist_ref],
+            album=album,
+            popularity=(raw.get("rank") or 0) // 10000,
+            duration_ms=duration_ms,
+            explicit=raw.get("explicit_lyrics") or False,
+            markets_count=0,
+            markets=[],
             status=TrackStatus.BASE_COLLECTED,
             appearance_score=1,
         )

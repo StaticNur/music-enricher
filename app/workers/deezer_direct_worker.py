@@ -249,6 +249,10 @@ class DeezerDirectWorker(BaseWorker):
                 albums_inserted = await self._crawl_artist_albums(artist_id)
                 inserted_total += albums_inserted
 
+            # BFS: enqueue related artists so the crawl expands beyond
+            # the initial genre seed (~1400 artists → potentially millions).
+            related_enqueued = await self._enqueue_related_artists(artist_id)
+
             await col.update_one(
                 {"artist_id": artist_id},
                 {"$set": {"processed": True, "locked_at": None, "updated_at": now}},
@@ -264,6 +268,7 @@ class DeezerDirectWorker(BaseWorker):
                 artist_id=artist_id,
                 artist_name=artist_name,
                 tracks_inserted=inserted_total,
+                related_enqueued=related_enqueued,
             )
 
         except Exception as exc:
@@ -308,6 +313,55 @@ class DeezerDirectWorker(BaseWorker):
                 break
 
         return inserted
+
+    # ── BFS expansion ────────────────────────────────────────────────────────
+
+    async def _enqueue_related_artists(self, artist_id: int) -> int:
+        """
+        Fetch Deezer related artists and add new ones to ``deezer_seed_queue``.
+
+        Uses ``$setOnInsert`` so already-queued artists are not re-inserted.
+        This is the BFS expansion step: the initial ~1400 genre-seed artists
+        each contribute ~20 related artists, growing the crawl to 20k+.
+
+        Unlike Spotify's ``/related-artists`` (deprecated Nov 2024), Deezer
+        still supports this endpoint.
+        """
+        assert self._deezer is not None
+        related = await self._deezer.get_artist_related(artist_id)
+        if not related:
+            return 0
+
+        col = self.db[DEEZER_SEED_QUEUE_COL]
+        now = datetime.now(timezone.utc)
+        enqueued = 0
+
+        for rel in related:
+            rel_id = rel.get("id")
+            if not rel_id:
+                continue
+            try:
+                result = await col.update_one(
+                    {"artist_id": rel_id},
+                    {"$setOnInsert": {
+                        "artist_id": rel_id,
+                        "artist_name": rel.get("name", ""),
+                        "genre_id": None,
+                        "genre_name": "",
+                        "processed": False,
+                        "locked_at": None,
+                        "locked_by": None,
+                        "created_at": now,
+                        "updated_at": now,
+                    }},
+                    upsert=True,
+                )
+                if result.upserted_id is not None:
+                    enqueued += 1
+            except Exception:
+                pass
+
+        return enqueued
 
     # ── Track upsert ──────────────────────────────────────────────────────────
 
