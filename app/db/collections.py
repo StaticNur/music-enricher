@@ -39,6 +39,9 @@ ALBUM_PROCESSED_CACHE_COL  = "album_processed_cache"
 # v5: Deezer direct discovery (no Spotify required)
 DEEZER_SEED_QUEUE_COL = "deezer_seed_queue"
 
+# v6: iTunes / Apple Music discovery (no Spotify required)
+ITUNES_SEED_QUEUE_COL = "itunes_seed_queue"
+
 
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
     """
@@ -53,6 +56,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type
     await _ensure_v3_indexes(db)
     await _ensure_graph_indexes(db)
     await _ensure_deezer_indexes(db)
+    await _ensure_itunes_indexes(db)
     logger.info("indexes_ensured")
 
 
@@ -82,6 +86,8 @@ async def _ensure_track_indexes(db: AsyncIOMotorDatabase) -> None:  # type: igno
         IndexModel([("popularity", DESCENDING)], name="popularity_idx"),
         IndexModel([("appearance_score", DESCENDING)], name="appearance_score_idx"),
         IndexModel([("artists.spotify_id", ASCENDING)], name="artist_spotify_id_idx"),
+        # Pre-check before iTunes/Deezer API calls — count tracks by artist name
+        IndexModel([("artists.name", ASCENDING)], name="artist_name_idx"),
 
         # ── Language & script (v2) ────────────────────────────────────────
         # language_worker polls: language IS NULL, status IN [...]
@@ -280,4 +286,16 @@ async def _ensure_deezer_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ign
             name="processed_locked_idx",
         ),
         IndexModel([("genre_id", ASCENDING)], name="genre_id_idx"),
+    ])
+
+
+async def _ensure_itunes_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Create indexes for v6 iTunes / Apple Music discovery queue."""
+    col = db[ITUNES_SEED_QUEUE_COL]
+    await col.create_indexes([
+        IndexModel([("artist_name", ASCENDING)], unique=True, name="artist_name_unique"),
+        IndexModel(
+            [("processed", ASCENDING), ("locked_at", ASCENDING)],
+            name="processed_locked_idx",
+        ),
     ])

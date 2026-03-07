@@ -149,6 +149,22 @@ class CandidateMatchWorker(BaseWorker):
         artist: str = candidate.get("artist") or ""
 
         try:
+            # ── 0. Pre-check: skip if track already in DB ─────────────────────
+            isrc: Optional[str] = candidate.get("isrc") or None
+            duration_ms_c: Optional[int] = candidate.get("duration_ms") or None
+            if await self._track_already_in_db(title, artist, duration_ms_c, isrc):
+                await col.update_one(
+                    {"_id": candidate_id},
+                    {"$set": {
+                        "processed": True,
+                        "locked_at": None,
+                        "locked_by": None,
+                        "updated_at": now,
+                    }},
+                )
+                await self.increment_stat("candidates_skipped_existing", 1)
+                return
+
             track_doc: Optional[TrackDocument] = None
             match_source = ""
 
@@ -476,6 +492,21 @@ class CandidateMatchWorker(BaseWorker):
             )
         except Exception as exc:
             logger.debug("youtube_set_failed", spotify_id=spotify_id, error=str(exc))
+
+    async def _track_already_in_db(
+        self,
+        title: str,
+        artist: str,
+        duration_ms: Optional[int],
+        isrc: Optional[str],
+    ) -> bool:
+        """Return True if the track is already present in the tracks collection."""
+        col = self.db[TRACKS_COL]
+        if isrc:
+            if await col.find_one({"isrc": isrc}, {"_id": 1}):
+                return True
+        fp = compute_candidate_fingerprint(title, artist, duration_ms or None)
+        return bool(await col.find_one({"fingerprint": fp}, {"_id": 1}))
 
     async def _enqueue_artist(self, artist_id: str, name: str) -> None:
         """Add artist to artist_queue for discography expansion."""

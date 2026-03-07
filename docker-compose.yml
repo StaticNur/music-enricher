@@ -217,6 +217,27 @@ services:
     deploy:
       replicas: 3
 
+  # ════════════════════════════════════════════════
+  # v6: iTunes / Apple Music Discovery (no Spotify, no auth)
+  # ════════════════════════════════════════════════
+
+  # ── iTunes Worker ─────────────────────────────
+  # Phase 1 (bootstrap): pulls Apple Music RSS charts for 40+ countries
+  #   → ~5K–15K unique chart tracks inserted immediately.
+  # Phase 2 (continuous): searches iTunes for every artist name already
+  #   in our DB (50K+ artists × 200 tracks ≈ 3M candidates per cycle,
+  #   ~1.5 hours per cycle at 8 rps).
+  # No authentication, no Spotify dependency.
+  # 2 replicas safe: iTunes rate limit is per-IP (~8 rps each).
+  itunes-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: itunes_worker
+      ITUNES_RATE_LIMIT_RPS: "3"
+      ITUNES_BATCH_SIZE: "10"
+    deploy:
+      replicas: 2
+
 networks:
   telegram-bot-network:
     external: true

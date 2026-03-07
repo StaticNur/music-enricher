@@ -140,6 +140,17 @@ class Settings(BaseSettings):
     # Minimum rapidfuzz confidence to accept a YTMusic search result
     ytmusic_video_match_confidence: float = Field(default=0.65)
 
+    # ── iTunes / Apple Music (v6) ─────────────────────────────────────────────
+    # Undocumented iTunes rate limit; 8 rps is safe in practice.
+    itunes_rate_limit_rps: float = Field(default=8.0)
+    # Artist names claimed per worker iteration (each = 1 iTunes search call)
+    itunes_batch_size: int = Field(default=10)
+    # Max artist names to pull from tracks on each queue seed cycle
+    itunes_seed_artist_limit: int = Field(default=200_000)
+    # Skip iTunes search for an artist if we already have this many tracks for them.
+    # Saves API quota when the artist is already well-covered in the DB.
+    itunes_skip_if_tracks_gte: int = Field(default=50)
+
     # ── Feature flags ────────────────────────────────────────────────────────
     # Set to False when Spotify revokes/restricts API access.
     # candidate_match_worker will use Deezer search exclusively.

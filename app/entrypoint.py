@@ -61,6 +61,8 @@ WORKER_TYPES = {
     "youtube_enrichment_worker",
     # v5 Deezer direct discovery (no Spotify required)
     "deezer_direct_worker",
+    # v6 iTunes / Apple Music discovery (no Spotify required)
+    "itunes_worker",
 }
 
 
@@ -182,6 +184,13 @@ async def _run_worker(worker_type: str) -> None:
         elif worker_type == "deezer_direct_worker":
             from app.workers.deezer_direct_worker import DeezerDirectWorker
             worker = DeezerDirectWorker(db, settings)
+            await worker.run()
+
+        # ── v6: iTunes / Apple Music discovery (no Spotify required) ──────────
+
+        elif worker_type == "itunes_worker":
+            from app.workers.itunes_worker import ItunesWorker
+            worker = ItunesWorker(db, settings)
             await worker.run()
 
         else:
