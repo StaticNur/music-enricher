@@ -141,6 +141,9 @@ class YandexWorker(BaseWorker):
         artist_seen: Dict[int, str] = {}  # artist_id → name
 
         for country in countries:
+            if self._yandex.is_banned:
+                logger.warning("yandex_chart_seed_aborted", reason="client banned mid-bootstrap")
+                break
             tracks = await self._yandex.get_chart(country)
             logger.info("yandex_chart_fetched", country=country, tracks=len(tracks))
 
@@ -201,6 +204,12 @@ class YandexWorker(BaseWorker):
     async def claim_batch(self) -> List[Dict[str, Any]]:
         if not self.settings.yandex_music_token:
             return []
+        if self._yandex and self._yandex.is_banned:
+            logger.warning(
+                "yandex_worker_halted",
+                reason="client is banned or rate-limited — no further requests will be sent",
+            )
+            return []
 
         col = self.db[YANDEX_SEED_QUEUE_COL]
         now = datetime.now(timezone.utc)
@@ -247,6 +256,9 @@ class YandexWorker(BaseWorker):
 
             # Paginate through full discography
             for page in range(_MAX_PAGES):
+                if self._yandex.is_banned:
+                    logger.warning("yandex_artist_aborted_banned", artist_id=artist_id)
+                    return
                 tracks = await self._yandex.get_artist_tracks(
                     artist_id, page=page, page_size=_PAGE_SIZE
                 )
@@ -259,6 +271,8 @@ class YandexWorker(BaseWorker):
                     break
 
             # BFS: enqueue similar artists
+            if self._yandex.is_banned:
+                return
             info = await self._yandex.get_artist_brief_info(artist_id)
             enqueued = 0
             if info and info.get("similar"):

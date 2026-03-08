@@ -51,6 +51,17 @@ class YandexMusicClient:
     first real API call, guarded by an asyncio.Lock for thread safety.
     """
 
+    # Strings in exception messages that indicate a hard ban / auth failure.
+    # When any of these are detected, the client sets _banned=True and stops
+    # sending further requests for the lifetime of this process.
+    _BAN_SIGNALS = (
+        "401", "403", "429",
+        "unauthorized", "forbidden",
+        "captcha", "blocked", "banned",
+        "too many requests", "rate limit",
+        "access denied",
+    )
+
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         rate = settings.yandex_music_rate_limit_rps
@@ -58,9 +69,38 @@ class YandexMusicClient:
         self._client: Any = None
         self._lock = asyncio.Lock()
         self._init_failed = False
+        self._banned = False  # set on any ban/auth error; stops all further requests
+
+    @property
+    def is_banned(self) -> bool:
+        """True once a ban or auth error has been detected."""
+        return self._banned
+
+    def _detect_ban(self, exc: Exception) -> bool:
+        """
+        Return True (and set _banned) if the exception looks like a ban / auth failure.
+        Logs a single clear error so the operator knows to stop the worker.
+        """
+        msg = str(exc).lower()
+        if any(signal in msg for signal in self._BAN_SIGNALS):
+            if not self._banned:
+                self._banned = True
+                logger.error(
+                    "yandex_banned_or_rate_limited",
+                    error=str(exc),
+                    message=(
+                        "Yandex Music returned a ban/auth/rate-limit signal. "
+                        "All further requests are suppressed for this process lifetime. "
+                        "Rotate the YANDEX_MUSIC_TOKEN or wait before restarting."
+                    ),
+                )
+            return True
+        return False
 
     async def _ensure_client(self) -> bool:
         """Lazy-initialize ClientAsync. Returns True if ready."""
+        if self._banned:
+            return False
         if self._client is not None:
             return True
         if self._init_failed:
@@ -111,6 +151,8 @@ class YandexMusicClient:
                 if item and item.track
             ]
         except Exception as exc:
+            if self._detect_ban(exc):
+                return []
             logger.warning("yandex_chart_failed", country=country, error=str(exc))
             return []
 
@@ -139,6 +181,8 @@ class YandexMusicClient:
                 return []
             return [self._track_to_dict(t) for t in result.tracks if t]
         except Exception as exc:
+            if self._detect_ban(exc):
+                return []
             logger.debug(
                 "yandex_artist_tracks_failed",
                 artist_id=artist_id,
@@ -177,6 +221,8 @@ class YandexMusicClient:
                 "similar": similar,
             }
         except Exception as exc:
+            if self._detect_ban(exc):
+                return None
             logger.debug(
                 "yandex_artist_info_failed", artist_id=artist_id, error=str(exc)
             )
