@@ -51,26 +51,37 @@ services:
       SPOTIFY_RATE_LIMIT_RPS: "1"
 
   # ── Audio Features Worker ─────────────────────────
-  # Disabled: Spotify returns 403 for all apps on this endpoint.
-  # Keeping the service defined so it can be re-enabled later if needed.
+  # Spotify returns 403 for /audio-features on most developer apps (deprecated).
+  # Worker detects this after the first batch and stops calling Spotify entirely —
+  # becomes a pure status advancer (base_collected → audio_features_added)
+  # with zero Spotify quota usage. MUST run to unblock lyrics/quality workers.
+  # High replica count is safe: after first 403 there are no Spotify calls.
   audio-features-worker:
     <<: *worker-common
     environment:
       WORKER_TYPE: audio_features_worker
+      BATCH_SIZE: "100"
     deploy:
-      replicas: 0
+      replicas: 5
 
   # ── Lyrics Worker ─────────────────────────────────
+  # Scale up to absorb the wave from audio_features_worker backlog.
+  # Genius rate limit is per-instance; multiple replicas are safe.
   lyrics-worker:
     <<: *worker-common
     environment:
       WORKER_TYPE: lyrics_worker
+    deploy:
+      replicas: 3
 
   # ── Quality Scoring Worker ────────────────────────
+  # Pure MongoDB reads/writes — no external API. Scale freely.
   quality-worker:
     <<: *worker-common
     environment:
       WORKER_TYPE: quality_worker
+    deploy:
+      replicas: 3
 
   # ── Exporter (runs on-demand or periodically) ─────
   exporter:
@@ -160,8 +171,10 @@ services:
     <<: *worker-common
     environment:
       WORKER_TYPE: candidate_match_worker
-      SPOTIFY_RATE_LIMIT_RPS: "1"
+      SPOTIFY_RATE_LIMIT_RPS: "2"
       # SPOTIFY_ENABLED: "false"   # ← uncomment when Spotify cuts access
+    deploy:
+      replicas: 2
 
   # ════════════════════════════════════════════════
   # v4: Artist Graph Expansion

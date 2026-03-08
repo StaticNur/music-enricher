@@ -74,6 +74,7 @@ class ArtistGraphWorker(BaseWorker):
     async def on_startup(self) -> None:
         self._spotify = SpotifyClient(self.settings)
         await self._bootstrap_queue()
+        await self._seed_regional_artists()
         logger.info("artist_graph_worker_started")
 
     async def on_shutdown(self) -> None:
@@ -81,6 +82,64 @@ class ArtistGraphWorker(BaseWorker):
             await self._spotify.aclose()
 
     # ── Seeding ───────────────────────────────────────────────────────────────
+
+    async def _seed_regional_artists(self) -> None:
+        """
+        Inject artists from CIS/Central Asia/MENA tracks into the graph queue.
+
+        Runs on EVERY startup — not gated on queue emptiness — so regional
+        artists discovered by regional_seed_worker, deezer_direct_worker, or
+        itunes_worker always enter the BFS even after the initial Western-biased
+        bootstrap from top-500 artists.
+
+        Only real Spotify IDs are enqueued (deezer:/itunes: placeholders skipped).
+        Already-processed artists are skipped via artist_processed_cache check
+        inside _maybe_enqueue_artist, so this method is fully idempotent.
+        """
+        col = self.db[TRACKS_COL]
+
+        pipeline = [
+            {
+                "$match": {
+                    "$or": [
+                        {"regions.cis": True},
+                        {"regions.central_asia": True},
+                        {"regions.mena": True},
+                    ]
+                }
+            },
+            {"$unwind": "$artists"},
+            {
+                "$group": {
+                    "_id": "$artists.spotify_id",
+                    "name": {"$first": "$artists.name"},
+                    "track_count": {"$sum": 1},
+                    "popularity": {"$max": "$popularity"},
+                }
+            },
+            {"$match": {"_id": {"$ne": None}}},
+            {"$sort": {"track_count": -1}},
+            {"$limit": 5000},
+        ]
+
+        enqueued = 0
+        async for doc in col.aggregate(pipeline):
+            artist_id: str = doc["_id"] or ""
+            # Skip placeholder IDs from Deezer/iTunes workers
+            if not artist_id or ":" in artist_id:
+                continue
+            priority = compute_artist_priority(doc.get("popularity") or 0, 0)
+            was_new = await self._maybe_enqueue_artist(
+                artist_id,
+                doc.get("name") or "",
+                depth=0,
+                priority=max(priority, 0.3),  # floor so regional artists aren't buried
+            )
+            if was_new:
+                enqueued += 1
+
+        if enqueued > 0:
+            logger.info("artist_graph_regional_artists_seeded", count=enqueued)
 
     async def _bootstrap_queue(self) -> None:
         """
