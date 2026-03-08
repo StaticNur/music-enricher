@@ -63,6 +63,8 @@ WORKER_TYPES = {
     "deezer_direct_worker",
     # v6 iTunes / Apple Music discovery (no Spotify required)
     "itunes_worker",
+    # v7 Yandex Music CIS discovery (token needed, free account)
+    "yandex_worker",
 }
 
 
@@ -191,6 +193,13 @@ async def _run_worker(worker_type: str) -> None:
         elif worker_type == "itunes_worker":
             from app.workers.itunes_worker import ItunesWorker
             worker = ItunesWorker(db, settings)
+            await worker.run()
+
+        # ── v7: Yandex Music CIS discovery (token needed, free account) ───────
+
+        elif worker_type == "yandex_worker":
+            from app.workers.yandex_worker import YandexWorker
+            worker = YandexWorker(db, settings)
             await worker.run()
 
         else:

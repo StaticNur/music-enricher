@@ -42,6 +42,9 @@ DEEZER_SEED_QUEUE_COL = "deezer_seed_queue"
 # v6: iTunes / Apple Music discovery (no Spotify required)
 ITUNES_SEED_QUEUE_COL = "itunes_seed_queue"
 
+# v7: Yandex Music CIS discovery (no Spotify required; token needed)
+YANDEX_SEED_QUEUE_COL = "yandex_seed_queue"
+
 
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
     """
@@ -57,6 +60,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type
     await _ensure_graph_indexes(db)
     await _ensure_deezer_indexes(db)
     await _ensure_itunes_indexes(db)
+    await _ensure_yandex_indexes(db)
     logger.info("indexes_ensured")
 
 
@@ -294,6 +298,18 @@ async def _ensure_itunes_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ign
     col = db[ITUNES_SEED_QUEUE_COL]
     await col.create_indexes([
         IndexModel([("artist_name", ASCENDING)], unique=True, name="artist_name_unique"),
+        IndexModel(
+            [("processed", ASCENDING), ("locked_at", ASCENDING)],
+            name="processed_locked_idx",
+        ),
+    ])
+
+
+async def _ensure_yandex_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Create indexes for v7 Yandex Music CIS discovery queue."""
+    col = db[YANDEX_SEED_QUEUE_COL]
+    await col.create_indexes([
+        IndexModel([("artist_id", ASCENDING)], unique=True, name="artist_id_unique"),
         IndexModel(
             [("processed", ASCENDING), ("locked_at", ASCENDING)],
             name="processed_locked_idx",

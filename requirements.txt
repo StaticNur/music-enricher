@@ -43,3 +43,6 @@ unicodedata2>=15.1.0
 # v3: external-source discovery
 # YouTube Music API (no auth required for public search/charts)
 ytmusicapi>=1.7.0
+
+# v7: Yandex Music CIS discovery (unofficial API, free Yandex account required)
+yandex-music>=2.0.0

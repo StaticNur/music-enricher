@@ -168,6 +168,10 @@ class Settings(BaseSettings):
     spotify_enabled: bool = Field(default=True)
 
     # ── Deezer direct discovery (v5) ─────────────────────────────────────────
+    # Per-instance rate limit. Deezer allows 50 req/5s = 10 rps per IP.
+    # With N replicas all on same host, set this to floor(10 / N).
+    # Default 3.0 → safe for up to 3 replicas (3×3=9 rps < 10 rps IP limit).
+    deezer_rate_limit_rps: float = Field(default=3.0)
     # Artists processed per worker iteration
     deezer_batch_size: int = Field(default=5)
     # Top tracks fetched per artist (Deezer max = 100)
@@ -176,6 +180,18 @@ class Settings(BaseSettings):
     deezer_crawl_albums: bool = Field(default=True)
     # Max albums crawled per artist when deezer_crawl_albums=True
     deezer_max_albums_per_artist: int = Field(default=20)
+
+    # ── Yandex Music discovery (v7) ───────────────────────────────────────────
+    # OAuth token from a free Yandex account. Worker is idle if not set.
+    yandex_music_token: str = Field(default="")
+    # Self-imposed rate limit — unofficial API, keep conservative.
+    yandex_music_rate_limit_rps: float = Field(default=2.0)
+    # Comma-separated CIS country codes to fetch charts from.
+    yandex_music_chart_countries: str = Field(default="ru,kz,by,uz,am,az,ge,ua,md")
+
+    @property
+    def yandex_music_chart_countries_list(self) -> list[str]:
+        return [c.strip() for c in self.yandex_music_chart_countries.split(",") if c.strip()]
 
     @field_validator(
         "quality_threshold",

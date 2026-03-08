@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-An autonomous music metadata enrichment pipeline targeting 10M–30M tracks. Discovers tracks via Spotify, Last.fm, YouTube Music, Discogs, Deezer, iTunes/Apple Music and an artist collaboration graph, enriches them with quality scores, YouTube video IDs and supplementary metadata, and stores everything in MongoDB. All workers share a single Docker image; the `WORKER_TYPE` env var selects which worker runs.
+An autonomous music metadata enrichment pipeline targeting 10M–30M tracks. Discovers tracks via Spotify, Last.fm, YouTube Music, Discogs, Deezer, iTunes/Apple Music, **Yandex Music** and an artist collaboration graph, enriches them with quality scores, YouTube video IDs and supplementary metadata, and stores everything in MongoDB. All workers share a single Docker image; the `WORKER_TYPE` env var selects which worker runs.
 
 ## Run tests
 

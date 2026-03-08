@@ -55,8 +55,11 @@ class DeezerClient:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        # Deezer: 50 req / 5 s = 10 rps sustained
-        self._limiter = RateLimiter(rate=8.0, capacity=8.0)
+        # Deezer: 50 req / 5 s = 10 rps per IP.
+        # Use settings.deezer_rate_limit_rps so multiple replicas on the same
+        # host don't collectively exceed the IP-level cap.
+        rate = settings.deezer_rate_limit_rps
+        self._limiter = RateLimiter(rate=rate, capacity=rate)
         self._http = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0),
             limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
@@ -189,6 +192,22 @@ class DeezerClient:
             return await self._retry(_fetch)()
         except Exception as exc:
             logger.error("deezer_get_chart_failed", error=str(exc))
+            return []
+
+    async def search_artists(
+        self, query: str, limit: int = 25
+    ) -> List[Dict[str, Any]]:
+        """Search artists by free-text query. Supports Cyrillic and Latin queries."""
+        async def _fetch() -> List[Dict[str, Any]]:
+            data = await self._get(
+                "/search/artist",
+                params={"q": query, "limit": min(limit, 100)},
+            )
+            return data.get("data", [])
+        try:
+            return await self._retry(_fetch)()
+        except Exception as exc:
+            logger.debug("deezer_search_artists_failed", query=query, error=str(exc))
             return []
 
     async def get_track(self, track_id: int) -> Optional[Dict[str, Any]]:

@@ -63,9 +63,9 @@ services:
     <<: *worker-common
     environment:
       WORKER_TYPE: audio_features_worker
-      BATCH_SIZE: "100"
+      BATCH_SIZE: "200"
     deploy:
-      replicas: 5
+      replicas: 8
 
   # ── Lyrics Worker ─────────────────────────────────
   # Scale up to absorb the wave from audio_features_worker backlog.
@@ -75,7 +75,7 @@ services:
     environment:
       WORKER_TYPE: lyrics_worker
     deploy:
-      replicas: 3
+      replicas: 5
 
   # ── Quality Scoring Worker ────────────────────────
   # Pure MongoDB reads/writes — no external API. Scale freely.
@@ -84,7 +84,7 @@ services:
     environment:
       WORKER_TYPE: quality_worker
     deploy:
-      replicas: 3
+      replicas: 6
 
   # ── Exporter (runs on-demand or periodically) ─────
   exporter:
@@ -228,10 +228,18 @@ services:
   # Uses "deezer:{id}" placeholder spotify_id; ISRC dedup prevents
   # conflicts with real Spotify tracks. Horizontally scalable.
   # 3 replicas safe: Deezer allows 50 req/5s, each replica uses 8 rps.
+  # ── Deezer Direct Worker ──────────────────────
+  # Inserts tracks directly from Deezer API into the pipeline.
+  # NO Spotify API required — works even when Spotify is rate-limited.
+  # RATE LIMIT: Deezer allows 50 req/5s = 10 rps per IP.
+  # With N replicas: set DEEZER_RATE_LIMIT_RPS = floor(10 / N).
+  # 3 replicas × 3 rps = 9 rps < 10 rps IP limit — safe.
+  # DO NOT increase DEEZER_RATE_LIMIT_RPS without reducing replicas.
   deezer-direct-worker:
     <<: *worker-common
     environment:
       WORKER_TYPE: deezer_direct_worker
+      DEEZER_RATE_LIMIT_RPS: "3"
       DEEZER_TOP_TRACKS_LIMIT: "100"
       DEEZER_MAX_ALBUMS_PER_ARTIST: "50"
     deploy:
@@ -253,10 +261,29 @@ services:
     <<: *worker-common
     environment:
       WORKER_TYPE: itunes_worker
-      ITUNES_RATE_LIMIT_RPS: "3"
-      ITUNES_BATCH_SIZE: "10"
+      ITUNES_RATE_LIMIT_RPS: "6"
+      ITUNES_BATCH_SIZE: "20"
     deploy:
-      replicas: 2
+      replicas: 3
+
+  # ════════════════════════════════════════════════
+  # v7: Yandex Music CIS Discovery
+  # ════════════════════════════════════════════════
+
+  # ── Yandex Music Worker ───────────────────────
+  # CIS-focused direct discovery: Russia, Kazakhstan, Belarus, Uzbekistan,
+  # Armenia, Azerbaijan, Georgia, Ukraine, Moldova.
+  # Phase 1: chart top tracks for each CIS country (inserted immediately).
+  # Phase 2: BFS artist discography expansion via similar-artists graph.
+  # Requires YANDEX_MUSIC_TOKEN from a free Yandex account.
+  # Worker is idle (no-op) if token is not set — safe to keep running.
+  # Rate: 2 rps (self-imposed, unofficial API).
+  # 2 replicas safe: per-instance rate is very conservative.
+  yandex-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: yandex_worker
+      # YANDEX_MUSIC_TOKEN: set in .env — get from free Yandex account
 
 networks:
   telegram-bot-network:

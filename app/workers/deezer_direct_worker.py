@@ -46,6 +46,25 @@ from datetime import timedelta
 
 logger = structlog.get_logger(__name__)
 
+# CIS/Central Asia/MENA artist search queries to explicitly seed the Deezer BFS.
+# The global genre seed covers ~1400 mostly Western artists; these queries
+# inject CIS artists at bootstrap so BFS reaches the region within the first cycle.
+_CIS_SEED_QUERIES: List[str] = [
+    # Russian (Latin + Cyrillic)
+    "русский рэп", "русская поп", "русский рок", "шансон", "русский хип-хоп",
+    "russian rap", "russian pop", "russian rock",
+    # Ukrainian
+    "українська поп", "ukrainian pop",
+    # Kazakh
+    "казахская музыка", "kazakh music", "kazakh pop",
+    # Uzbek
+    "o'zbek pop", "uzbek music",
+    # Azerbaijani / Armenian / Georgian
+    "azerbaijani music", "armenian pop", "georgian music",
+    # Central Asia broad
+    "central asian music",
+]
+
 
 def _deezer_fingerprint(title: str, artist_name: str, duration_s: int) -> str:
     """
@@ -120,6 +139,7 @@ class DeezerDirectWorker(BaseWorker):
         # First run: insert global chart directly, then seed artist queue
         await self._insert_chart_tracks()
         await self._seed_from_genres()
+        await self._seed_cis_artists()
 
     async def _insert_chart_tracks(self) -> None:
         """Insert global Deezer chart directly (no queue item needed)."""
@@ -133,6 +153,57 @@ class DeezerDirectWorker(BaseWorker):
                 inserted += 1
         logger.info("deezer_chart_inserted", inserted=inserted, total=len(tracks))
         await self.increment_stat("deezer_chart_tracks_inserted", inserted)
+
+    async def _seed_cis_artists(self) -> None:
+        """
+        Search Deezer for CIS/Central Asia artists and add them directly to the queue.
+
+        The global genre seed populates ~1400 mostly Western artists; this step
+        explicitly injects CIS artists at bootstrap so the BFS graph reaches the
+        region within the first processing cycle instead of depth 3–4.
+        """
+        assert self._deezer is not None
+        col = self.db[DEEZER_SEED_QUEUE_COL]
+        now = datetime.now(timezone.utc)
+        ops: List[Any] = []
+
+        for query in _CIS_SEED_QUERIES:
+            artists = await self._deezer.search_artists(query, limit=25)
+            for artist in artists:
+                artist_id = artist.get("id")
+                if not artist_id:
+                    continue
+                ops.append(UpdateOne(
+                    {"artist_id": artist_id},
+                    {"$setOnInsert": {
+                        "artist_id": artist_id,
+                        "artist_name": artist.get("name", ""),
+                        "genre_id": None,
+                        "genre_name": f"cis_seed:{query[:30]}",
+                        "processed": False,
+                        "locked_at": None,
+                        "locked_by": None,
+                        "created_at": now,
+                        "updated_at": now,
+                    }},
+                    upsert=True,
+                ))
+
+        if not ops:
+            return
+
+        try:
+            result = await col.bulk_write(ops, ordered=False)
+            logger.info(
+                "deezer_cis_artists_seeded",
+                seeded=result.upserted_count,
+                total_candidates=len(ops),
+            )
+        except BulkWriteError as bwe:
+            logger.info(
+                "deezer_cis_artists_seeded",
+                seeded=bwe.details.get("nUpserted", 0),
+            )
 
     async def _seed_from_genres(self) -> None:
         """Fetch genre list, collect all genre artists, bulk-insert into queue."""
