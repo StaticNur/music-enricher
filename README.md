@@ -1,80 +1,168 @@
 # Music Metadata Enrichment Pipeline
 
-Autonomous data-harvesting system that collects and enriches 1,000,000+ music tracks using the **Spotify Web API** and **Genius API**, stores everything in **MongoDB**, and runs fully unattended for days at a time.
+Autonomous data-harvesting system that collects and enriches **10M–30M music tracks** from multiple sources — Spotify, Last.fm, YouTube Music, Discogs, Deezer, iTunes/Apple Music — stores everything in **MongoDB**, and runs fully unattended. All workers share a single Docker image; `WORKER_TYPE` selects which one runs.
 
 ---
 
 ## Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Docker Compose Network                   │
-│                                                             │
-│  ┌──────────┐  playlists   ┌──────────────────────────────┐ │
-│  │          │─────────────▶│   playlist_worker            │ │
-│  │  seeder  │  genres      │   artist_worker              │ │
-│  │ (once)   │─────────────▶│   genre_worker               │ │
-│  └──────────┘              └────────────┬─────────────────┘ │
-│                                         │ tracks             │
-│                                         ▼ base_collected     │
-│                             ┌───────────────────────────┐   │
-│                             │  audio_features_worker    │   │
-│                             └───────────┬───────────────┘   │
-│                                         │ audio_features_    │
-│                                         ▼  added            │
-│                             ┌───────────────────────────┐   │
-│                             │     lyrics_worker         │   │
-│                             └───────────┬───────────────┘   │
-│                                         │ lyrics_added       │
-│                                         ▼                    │
-│                             ┌───────────────────────────┐   │
-│                             │     quality_worker        │   │
-│                             └───────────┬───────────────┘   │
-│                                         │ enriched /         │
-│                                         ▼ filtered_out       │
-│                             ┌───────────────────────────┐   │
-│                             │     exporter              │   │
-│                             │  (CSV + JSONL output)     │   │
-│                             └───────────────────────────┘   │
-│                                                             │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │                     MongoDB                          │  │
-│  │  collections: tracks, artists, system_stats,         │  │
-│  │               playlist_queue, artist_queue,          │  │
-│  │               genre_queue                            │  │
-│  └──────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### State Machine
-
-Every track in the `tracks` collection progresses through these statuses:
+### Discovery sources → single tracks collection
 
 ```
-discovered
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        DISCOVERY LAYER                                  │
+│                                                                         │
+│  v1  seeder ──────────────────────────────────────────────────────┐     │
+│       ├─ playlist_worker  (Spotify playlists)                     │     │
+│       ├─ genre_worker     (Spotify genre search)                  │     │
+│       └─ artist_worker    (Spotify artist discographies)          │     │
+│                                                                   │     │
+│  v3  lastfm_worker  ──┐                                           │     │
+│      ytmusic_worker ──┼─→ track_candidates → candidate_match_worker     │
+│      discogs_worker ──┘                                           │     │
+│                                                                   ▼     │
+│  v4  artist_graph_worker  (BFS, depth 5, 10M–30M tracks) ──→  tracks   │
+│                                                                         │
+│  v5  deezer_direct_worker (Deezer, no auth) ──────────────→  tracks    │
+│                                                                         │
+│  v6  itunes_worker (iTunes API + Apple Music RSS) ────────→  tracks    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+                                  │
+                    ┌─────────────▼──────────────┐
+                    │       ENRICHMENT LAYER      │
+                    │                             │
+                    │  audio_features_worker      │
+                    │  lyrics_worker              │
+                    │  quality_worker → enriched  │
+                    │                             │
+                    │  Supplementary (v2):        │
+                    │  language_worker            │
+                    │  transliteration_worker     │
+                    │  musicbrainz_worker         │
+                    │  regional_seed_worker       │
+                    │  youtube_enrichment_worker  │
+                    └─────────────────────────────┘
+```
+
+### Track state machine (v1 core pipeline)
+
+```
+base_collected
     ↓
-base_collected       ← inserted by playlist/artist/genre workers
-    ↓
-audio_features_added ← Spotify /audio-features batch API
-    ↓
-lyrics_added         ← Genius search + HTML scrape
-    ↓
-enriched             ← quality_score ≥ threshold
+audio_features_added  ← Spotify /audio-features (403 expected, pipeline continues)
+    ↓ (or shortcut ──────────────────────────────────────────────────┐
+lyrics_added          ← Genius search + HTML scrape                  │
+    ↓                                                                ↓
+enriched              ← quality_score ≥ threshold      quality_worker accepts both
+    OR                                                  audio_features_added
+filtered_out          ← quality_score < threshold       and lyrics_added
     OR
-filtered_out         ← quality_score < threshold
-    OR
-failed               ← exceeded retry_count
+failed                ← exceeded retry_count
 ```
 
-### MongoDB-as-Queue (No Redis)
+**`quality_worker`** accepts **both** `audio_features_added` and `lyrics_added` as input, so at 10M+ scale the pipeline never waits weeks for Genius to finish.
+
+### MongoDB-as-Queue (no Redis)
 
 Workers use **`findOneAndUpdate`** with optimistic locking:
 
-1. Worker atomically sets `status = "processing"` and `locked_at = now`
+1. Worker atomically sets `locked_at = now`, `locked_by = host:pid`
 2. Worker processes the document
-3. Worker sets final status (`audio_features_added`, etc.)
-4. If a worker crashes, items with `locked_at` older than 5 minutes
-   are automatically reclaimed by the next worker iteration
+3. Worker sets final status
+4. Items with `locked_at` older than 5 minutes are automatically reclaimed — crash-safe
+
+---
+
+## Workers (22 total)
+
+### v1 — Core pipeline
+
+| Worker | Input | Output | Notes |
+|---|---|---|---|
+| `seeder` | — | playlist_queue + genre_queue | Runs once, exits. Seeds 50 playlists + 50 categories + 150+ genres |
+| `playlist_worker` | playlist_queue | base_collected | Tracks from Spotify playlists, increments appearance_score |
+| `artist_worker` | artist_queue | — | Expands artist discographies (simple) |
+| `genre_worker` | genre_queue | base_collected | Paginated Spotify genre search |
+| `audio_features_worker` | base_collected | audio_features_added | Spotify 403 expected → advances anyway |
+| `lyrics_worker` | audio_features_added | lyrics_added | Genius search + HTML scrape, advances on miss |
+| `quality_worker` | audio_features_added **or** lyrics_added | enriched / filtered_out | Scores and filters |
+| `exporter` | enriched | — | On-demand CSV + JSONL export |
+
+### v2 — Supplementary (flag-driven, never touch `status`)
+
+| Worker | Flag set | Notes |
+|---|---|---|
+| `language_worker` | `language_detected` | langdetect → script heuristic. Source priority: MusicBrainz → Genius lyrics → track name |
+| `transliteration_worker` | `transliteration_done` | Cyrillic/Arabic/Georgian/Armenian → Latin |
+| `musicbrainz_worker` | `musicbrainz_enriched` | MBID, composers, release countries. Priority: CIS > Central Asia > MENA > general. **1 req/s, single replica only** |
+| `regional_seed_worker` | — | Self-seeds regional_seed_queue with CIS/Central Asia/MENA Spotify queries |
+
+### v3 — External-source discovery
+
+```
+lastfm_worker   ┐
+ytmusic_worker  ├─→ track_candidates → candidate_match_worker → tracks (base_collected)
+discogs_worker  ┘
+```
+
+| Worker | Source | Notes |
+|---|---|---|
+| `lastfm_worker` | Last.fm tag/chart top tracks | Self-seeding, paginates (page tracked per item) |
+| `ytmusic_worker` | YTMusic search + country charts | Self-seeding, one-shot, stores `youtube_video_id` |
+| `discogs_worker` | Discogs genre style releases | Self-seeding, paginates. **1 req/s, single replica only** |
+| `candidate_match_worker` | track_candidates | Spotify search → Deezer fallback. rapidfuzz 60/40 title/artist scoring, threshold 0.8 |
+
+New collections: `track_candidates`, `lastfm_seed_queue`, `ytmusic_seed_queue`, `discogs_seed_queue`
+
+### v4 — Artist graph expansion (10M–30M tracks)
+
+BFS traversal starting from top 500 artists in existing tracks, depth limit 5. At full depth: ~50K–100K artists, ~500K–1M albums, ~10M–30M tracks.
+
+```
+artist_graph_queue (priority DESC)
+    ↓
+artist_graph_worker
+    ├─ full discography (album + single + compilation + appears_on)
+    │    └─ batch-fetch tracks for ISRC → upsert, $addToSet version_album_ids
+    │         └─ featured artists → enqueue (depth + 1)
+    └─ related artists → enqueue (depth + 1, priority × 0.6)
+
+youtube_enrichment_worker
+    └─ YTMusic search for tracks missing youtube_video_id
+    └─ rapidfuzz confidence ≥ 0.65, sets youtube_searched=True
+```
+
+Priority formula: `0.4 × (popularity/100) + 0.3 × min(log(followers+1)/14, 1.0)`
+
+New collections: `artist_graph_queue`, `artist_processed_cache`, `album_processed_cache`
+
+### v5 — Deezer direct discovery (Spotify-independent)
+
+Inserts tracks directly as `base_collected` using `"deezer:{id}"` as placeholder `spotify_id`. Real Spotify ID is backfilled when `artist_graph_worker` or `candidate_match_worker` finds the same track.
+
+| Worker | Source | Notes |
+|---|---|---|
+| `deezer_direct_worker` | Deezer genre → artists → top tracks + albums | No auth, ~8 rps, ~90M tracks reachable. 3 replicas |
+
+New collection: `deezer_seed_queue`
+
+### v6 — iTunes / Apple Music discovery
+
+Two-phase, no authentication required.
+
+| Phase | Source | Scale |
+|---|---|---|
+| Phase 1 (on startup) | Apple Music RSS charts, 40+ countries | ~5K–15K tracks per cycle |
+| Phase 2 (queue) | iTunes Search API, artist name search | ~3M candidates per cycle, ~1.5h at 8 rps |
+
+Placeholder `spotify_id="itunes:{trackId}"`, backfilled later. 403 backoff: after 5 consecutive 403s → sleep 300s.
+
+| Worker | Notes |
+|---|---|
+| `itunes_worker` | 2 replicas safe. 8 rps. Auto-reseed when queue exhausted |
+
+New collection: `itunes_seed_queue`
 
 ---
 
@@ -84,35 +172,58 @@ Workers use **`findOneAndUpdate`** with optimistic locking:
 music-enricher/
 ├── app/
 │   ├── core/
-│   │   ├── config.py          # Pydantic settings (all from env)
-│   │   └── logging_config.py  # Structured JSON logging (structlog)
+│   │   ├── config.py                   # Pydantic Settings — all from env
+│   │   └── logging_config.py           # Structured JSON logging (structlog)
 │   ├── db/
-│   │   ├── mongodb.py         # Async Motor connection + retry
-│   │   └── collections.py     # Collection names + index bootstrap
+│   │   ├── mongodb.py                  # Async Motor connection + retry
+│   │   └── collections.py             # Collection names + index bootstrap
 │   ├── models/
-│   │   ├── track.py           # TrackDocument, TrackStatus, AudioFeatures, LyricsData
-│   │   ├── artist.py          # ArtistDocument
-│   │   ├── stats.py           # SystemStats
-│   │   └── queue.py           # PlaylistQueueItem, ArtistQueueItem, GenreQueueItem
+│   │   ├── track.py                    # TrackDocument, TrackStatus, YoutubeData, MusicBrainzData, RegionData
+│   │   ├── artist.py                   # ArtistDocument
+│   │   ├── candidate.py               # CandidateDocument + seed queue models (v3)
+│   │   └── artist_graph.py            # ArtistGraphItem, compute_artist_priority() (v4)
 │   ├── services/
-│   │   ├── spotify.py         # Spotify API client (token refresh, rate limit, retry)
-│   │   └── genius.py          # Genius API + lyrics scraping client
+│   │   ├── spotify.py                  # Token refresh, rate limit, circuit breaker, retry
+│   │   ├── genius.py                   # Search + HTML scrape, fuzzy match
+│   │   ├── lastfm.py                   # Last.fm API (httpx, 4 rps)
+│   │   ├── ytmusic.py                  # ytmusicapi wrapper (async executor)
+│   │   ├── discogs.py                  # Discogs API (httpx, 1 rps)
+│   │   ├── deezer.py                   # Deezer public API (httpx, 8 rps, no auth)
+│   │   ├── apple_music.py             # iTunes Search API + Apple Music RSS
+│   │   └── musicbrainz.py             # ISRC lookup + fuzzy matching
 │   ├── utils/
-│   │   ├── rate_limiter.py    # Async token-bucket rate limiter
-│   │   ├── deduplication.py   # ISRC + fingerprint dedup
-│   │   ├── scoring.py         # Quality score formula
-│   │   └── signals.py         # SIGTERM/SIGINT graceful shutdown
+│   │   ├── rate_limiter.py            # Async token-bucket RateLimiter
+│   │   ├── circuit_breaker.py         # CLOSED→OPEN→HALF_OPEN (Spotify)
+│   │   ├── deduplication.py           # compute_fingerprint + compute_candidate_fingerprint
+│   │   ├── scoring.py                  # Quality score + regional boost
+│   │   ├── regional.py                # Regional scoring (CIS / Central Asia / MENA)
+│   │   ├── transliteration.py         # Cyrillic/Arabic → Latin
+│   │   └── signals.py                  # SIGTERM/SIGINT graceful shutdown
 │   ├── workers/
-│   │   ├── base.py            # BaseWorker (polling loop, locking, stats)
-│   │   ├── seeder.py          # One-shot queue initializer
-│   │   ├── playlist_worker.py # Extracts tracks from playlists
-│   │   ├── artist_worker.py   # Expands artist discographies
-│   │   ├── genre_worker.py    # Searches by genre with pagination
+│   │   ├── base.py                     # BaseWorker: polling loop, locking, stale-lock recovery
+│   │   ├── seeder.py
+│   │   ├── playlist_worker.py
+│   │   ├── artist_worker.py
+│   │   ├── genre_worker.py
 │   │   ├── audio_features_worker.py
 │   │   ├── lyrics_worker.py
 │   │   ├── quality_worker.py
-│   │   └── exporter.py        # CSV + JSONL export
-│   └── entrypoint.py          # WORKER_TYPE dispatch
+│   │   ├── exporter.py
+│   │   ├── language_worker.py          # v2
+│   │   ├── transliteration_worker.py   # v2
+│   │   ├── musicbrainz_worker.py       # v2
+│   │   ├── regional_seed_worker.py     # v2
+│   │   ├── lastfm_worker.py            # v3
+│   │   ├── ytmusic_worker.py           # v3
+│   │   ├── discogs_worker.py           # v3
+│   │   ├── candidate_match_worker.py   # v3
+│   │   ├── artist_graph_worker.py      # v4
+│   │   ├── youtube_enrichment_worker.py # v4
+│   │   ├── deezer_direct_worker.py     # v5
+│   │   └── itunes_worker.py            # v6
+│   └── entrypoint.py                   # WORKER_TYPE dispatch (22 workers)
+├── tests/
+│   └── test_candidate.py              # normalize_text, fingerprint, circuit breaker, service parsers
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
@@ -129,52 +240,65 @@ music-enricher/
 - Docker ≥ 24
 - Docker Compose ≥ 2.20
 - Spotify Developer account → [developer.spotify.com](https://developer.spotify.com/dashboard)
-- Genius API token → [genius.com/api-clients](https://genius.com/api-clients)
+- Genius API token → [genius.com/api-clients](https://genius.com/api-clients) (optional — pipeline advances without it)
+- Last.fm API key → [last.fm/api/account/create](https://www.last.fm/api/account/create) (for v3)
+- Discogs personal access token → [discogs.com/settings/developers](https://www.discogs.com/settings/developers) (for v3; optional — 25 rps without auth)
 
-### 2. Configure credentials
+### 2. Configure
 
 ```bash
 cp .env.example .env
-# Edit .env and fill in:
-#   SPOTIFY_CLIENT_ID
-#   SPOTIFY_CLIENT_SECRET
-#   GENIUS_ACCESS_TOKEN
+# Required: SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
+# Optional: GENIUS_ACCESS_TOKEN, LASTFM_API_KEY, DISCOGS_TOKEN
+# Set MONGODB_DB=MusicEnricher (production convention)
 ```
 
-### 3. Launch the full pipeline
+### 3. Launch
 
 ```bash
 docker-compose up -d
 ```
 
-All workers start automatically. The seeder runs once and seeds the work queues;
-the other workers poll indefinitely.
+All workers start automatically. `seeder` runs once and seeds queues; all other workers poll indefinitely.
 
 ### 4. Monitor progress
 
 ```bash
-# Follow logs from all workers
+# All logs
 docker-compose logs -f
 
-# Follow a specific worker
-docker-compose logs -f playlist-worker
+# Specific worker
+docker-compose logs -f artist-graph-worker
 
-# Check pipeline stats directly in MongoDB
-docker-compose exec mongo mongosh music_enricher --eval \
+# Track counts by status (most important health check)
+docker-compose exec mongo mongosh MusicEnricher --eval \
+  'db.tracks.aggregate([{$group:{_id:"$status",count:{$sum:1}}}]).toArray()'
+
+# Pipeline counters
+docker-compose exec mongo mongosh MusicEnricher --eval \
   'db.system_stats.findOne({doc_id: "global"}, {_id: 0})'
 
-# Count tracks by status
-docker-compose exec mongo mongosh music_enricher --eval \
-  'db.tracks.aggregate([{$group:{_id:"$status", count:{$sum:1}}}]).toArray()'
+# Artist graph progress
+docker-compose exec mongo mongosh MusicEnricher --eval \
+  'printjson({
+    queue: db.artist_graph_queue.countDocuments({processed:false}),
+    processed: db.artist_processed_cache.countDocuments({}),
+    albums: db.album_processed_cache.countDocuments({})
+  })'
+
+# Deezer / iTunes queue progress
+docker-compose exec mongo mongosh MusicEnricher --eval \
+  'printjson({
+    deezer_pending: db.deezer_seed_queue.countDocuments({processed:false}),
+    itunes_pending: db.itunes_seed_queue.countDocuments({processed:false}),
+    candidates: db.track_candidates.countDocuments({processed:false})
+  })'
 ```
 
 ### 5. Export enriched tracks
 
 ```bash
-# Run exporter once
 docker-compose run --rm exporter
-
-# Files land in the exports volume
 docker-compose exec exporter ls /data/exports/
 ```
 
@@ -184,56 +308,111 @@ docker-compose exec exporter ls /data/exports/
 docker-compose down
 ```
 
-Workers catch SIGTERM, finish the current batch, and exit cleanly.
-All progress is persisted in MongoDB — resume by running `docker-compose up -d` again.
+Workers catch SIGTERM, finish the current batch, then exit. Resume anytime with `docker-compose up -d`.
 
 ---
 
 ## Configuration Reference
 
+### Core (v1)
+
 | Variable | Default | Description |
 |---|---|---|
 | `MONGODB_URI` | `mongodb://mongo:27017` | MongoDB connection string |
-| `MONGODB_DB` | `music_enricher` | Database name |
+| `MONGODB_DB` | `music_enricher` | Database name (production: `MusicEnricher`) |
 | `SPOTIFY_CLIENT_ID` | — | **Required** |
 | `SPOTIFY_CLIENT_SECRET` | — | **Required** |
-| `SPOTIFY_RATE_LIMIT_RPS` | `10.0` | Spotify requests/second |
-| `GENIUS_ACCESS_TOKEN` | — | **Required** |
+| `SPOTIFY_RATE_LIMIT_RPS` | `3.0` | Spotify requests/second per worker |
+| `SPOTIFY_MAX_RATE_LIMIT_SLEEP` | `60` | Max seconds to sleep on 429 (prevents hour-long stalls) |
+| `GENIUS_ACCESS_TOKEN` | — | Optional — pipeline advances without it |
 | `GENIUS_RATE_LIMIT_RPS` | `3.0` | Genius requests/second |
-| `GENIUS_MIN_CONFIDENCE` | `0.6` | Min fuzzy match score (0–1) |
+| `GENIUS_MIN_CONFIDENCE` | `0.6` | Min rapidfuzz score for lyrics match |
 | `BATCH_SIZE` | `50` | Documents per worker iteration |
-| `WORKER_SLEEP_SEC` | `5` | Seconds to sleep when queue empty |
-| `WORKER_RETRY_LIMIT` | `3` | Max retries before status=failed |
-| `QUALITY_THRESHOLD` | `0.1` | Min quality_score to keep |
-| `MIN_PLAYLIST_FOLLOWERS` | `10000` | Min followers for playlist seeding |
-| `GENRE_MAX_OFFSET` | `1000` | Max search pagination offset |
+| `WORKER_SLEEP_SEC` | `5` | Sleep when queue is empty |
+| `WORKER_RETRY_LIMIT` | `3` | Max retries before `status=failed` |
+| `QUALITY_THRESHOLD` | `0.1` | Min quality_score to keep track |
+| `MIN_PLAYLIST_FOLLOWERS` | `10000` | Min playlist followers to seed |
 | `STATS_LOG_INTERVAL_MIN` | `10` | Minutes between progress logs |
 | `EXPORT_DIR` | `/data/exports` | Output directory |
 
+### MusicBrainz (v2)
+
+| Variable | Default | Description |
+|---|---|---|
+| `MUSICBRAINZ_ENABLED` | `true` | Enable MusicBrainz enrichment |
+| `MUSICBRAINZ_USER_AGENT` | `MusicEnricher/1.0` | **Required by MusicBrainz** — include your contact |
+| `MUSICBRAINZ_RATE_LIMIT_RPS` | `1.0` | **Do not increase** — 24h+ IP ban risk |
+| `MUSICBRAINZ_MIN_CONFIDENCE` | `0.75` | Min match confidence to store MB data |
+| `MUSICBRAINZ_DURATION_TOLERANCE_MS` | `3000` | ±ms for duration matching |
+| `TARGET_REGIONS` | `cis,central_asia,mena` | Regions to target |
+| `REGIONAL_BOOST_ENABLED` | `true` | Use regional scoring formula |
+| `REGIONAL_BOOST_WEIGHT` | `0.15` | Regional score weight in final score |
+| `LANGUAGE_DETECTION_ENABLED` | `true` | Enable language_worker |
+| `TRANSLITERATION_ENABLED` | `true` | Enable transliteration_worker |
+
+### External sources (v3)
+
+| Variable | Default | Description |
+|---|---|---|
+| `LASTFM_API_KEY` | — | Free at last.fm |
+| `LASTFM_RATE_LIMIT_RPS` | `4.0` | Last.fm requests/second |
+| `LASTFM_MAX_PAGES` | `200` | Max pages per seed item |
+| `DISCOGS_TOKEN` | — | Personal access token (60 rps auth vs 25 anon) |
+| `DISCOGS_RATE_LIMIT_RPS` | `1.0` | **Do not increase** — IP throttle risk |
+| `DISCOGS_MAX_PAGES` | `100` | Max pages per seed item |
+| `CANDIDATE_MATCH_CONFIDENCE` | `0.8` | Min score to accept Spotify match |
+
+### Artist graph (v4)
+
+| Variable | Default | Description |
+|---|---|---|
+| `ARTIST_GRAPH_MAX_DEPTH` | `5` | BFS depth limit |
+| `ARTIST_GRAPH_BATCH_SIZE` | `3` | Artists per iteration |
+| `ARTIST_GRAPH_SEED_LIMIT` | `500` | Top artists to seed from existing tracks |
+| `ARTIST_GRAPH_MAX_APPEARS_ON` | `50` | Max appears_on albums per artist |
+| `YTMUSIC_VIDEO_MATCH_CONFIDENCE` | `0.65` | Min rapidfuzz score for YouTube match |
+
+### Deezer (v5)
+
+| Variable | Default | Description |
+|---|---|---|
+| `DEEZER_TOP_TRACKS_LIMIT` | `50` | Top tracks per artist |
+| `DEEZER_CRAWL_ALBUMS` | `true` | Also crawl artist albums |
+| `DEEZER_MAX_ALBUMS_PER_ARTIST` | `20` | Max albums to fetch per artist |
+
+### iTunes / Apple Music (v6)
+
+| Variable | Default | Description |
+|---|---|---|
+| `ITUNES_RATE_LIMIT_RPS` | `4.0` | iTunes Search API requests/second |
+| `ITUNES_BATCH_SIZE` | `10` | Artists processed per iteration |
+| `ITUNES_SEED_ARTIST_LIMIT` | `200000` | Max artists per queue cycle |
+| `ITUNES_SKIP_IF_TRACKS_GTE` | `50` | Skip artist if already has ≥N tracks |
+| `ITUNES_403_BACKOFF_AFTER` | `5` | Consecutive 403s before sleep |
+| `ITUNES_403_BACKOFF_SECONDS` | `300` | Seconds to sleep after 403 backoff |
+
 ---
 
-## Quality Scoring Formula
+## Quality Scoring
+
+### Base formula
 
 ```
 quality_score =
     0.40 × (popularity / 100)
-    0.30 × (artist_followers / 50_000_000)
-    0.20 × (appearance_score / 200)
-    0.10 × (markets_count / 185)
+  + 0.30 × min(artist_followers / 50_000_000, 1.0)
+  + 0.20 × min(appearance_score / 200, 1.0)
+  + 0.10 × (markets_count / 185)
 ```
 
-All components clamped to [0, 1]. Tracks with `quality_score < QUALITY_THRESHOLD`
-receive `status = filtered_out` and are excluded from the export.
+### Regional boost (v2, when `REGIONAL_BOOST_ENABLED=true`)
 
----
+```
+final_score = (1 - REGIONAL_BOOST_WEIGHT) × base_score
+            + REGIONAL_BOOST_WEIGHT × regional_score
+```
 
-## Data Sources
-
-| Source | Priority | Description |
-|---|---|---|
-| **Playlist Mining** | Highest | Editorial + featured + category + keyword playlists. Increments `appearance_score` on each hit — the best proxy for all-time popularity. |
-| **Artist Expansion** | Medium | Full discographies (albums + singles) of every discovered artist. |
-| **Genre Expansion** | Background | Paginated search across 200+ genres to fill gaps. |
+Tracks below `QUALITY_THRESHOLD` get `status=filtered_out` and are excluded from export.
 
 ---
 
@@ -243,332 +422,100 @@ Tracks are never duplicated:
 
 1. **ISRC** (primary) — globally unique identifier, used when available
 2. **Fingerprint** (fallback) — `sha256(normalized_name | first_artist_id | duration_bucket(2s))`
+3. **Candidate fingerprint** (v3) — `sha256(normalized_title | normalized_artist [| duration_bucket])` — uses artist *name* since Spotify ID is unknown at candidate stage
+
+`normalize_text` strips: feat./ft./featuring, remaster/live/official video tags, track-number prefixes, punctuation → spaces.
 
 ---
 
-## Rate Limiting
+## Rate Limiting & Safety
 
-Each API has its own **async token-bucket limiter**:
+Each API client has its own async token-bucket limiter. On HTTP 429, the worker sleeps `min(Retry-After, SPOTIFY_MAX_RATE_LIMIT_SLEEP)` seconds before retrying — the cap prevents multi-hour stalls.
 
-- Spotify: 10 req/s (configurable)
-- Genius: 3 req/s (configurable)
+**Spotify circuit breaker**: after 5 consecutive failures (429/5xx/network errors), the circuit opens for 120s. 401/403/404 do not count as failures. Prevents thundering herd on degraded API.
 
-On HTTP 429, the worker automatically sleeps for `Retry-After` seconds
-before retrying. All network calls use **tenacity** with exponential
-backoff + jitter.
+| Worker | Rate limit | Safety constraint |
+|---|---|---|
+| `discogs_worker` | 1 req/s | IP throttle/ban — **single replica only** |
+| `musicbrainz_worker` | 1 req/s | 24h+ IP ban — **single replica only** |
+| `itunes_worker` | 8 rps + 403 backoff | 2 replicas safe |
+| All others | Configurable | Safe to scale horizontally |
 
 ---
 
 ## Scaling
 
-To process faster, add more worker replicas:
+Workers compete for the same MongoDB queues. Optimistic locking handles concurrent workers safely — just add replicas:
 
 ```yaml
 # docker-compose.override.yml
 services:
-  audio-features-worker:
+  artist-graph-worker:
     deploy:
-      replicas: 3
+      replicas: 5   # default: 3
+  deezer-direct-worker:
+    deploy:
+      replicas: 5   # default: 3
   lyrics-worker:
     deploy:
-      replicas: 2
+      replicas: 3
 ```
 
-Workers compete for the same MongoDB queue — no coordination needed.
-The optimistic locking pattern handles concurrent workers safely.
+**Single-replica only**: `discogs-worker`, `musicbrainz-worker`.
 
 ---
 
 ## MongoDB Collections
 
-| Collection | Description |
-|---|---|
-| `tracks` | Main track documents with full enrichment data |
-| `artists` | Artist metadata (genres, followers, popularity) |
-| `system_stats` | Single-document pipeline counters |
-| `playlist_queue` | Work queue of playlists to scrape |
-| `artist_queue` | Work queue of artists to expand |
-| `genre_queue` | Work queue of genres + pagination offset |
+| Collection | Version | Description |
+|---|---|---|
+| `tracks` | v1 | Main enriched track documents |
+| `artists` | v1 | Spotify artist metadata cache |
+| `system_stats` | v1 | Global pipeline counters |
+| `playlist_queue` | v1 | Playlists to scrape |
+| `artist_queue` | v1 | Artists to expand (simple) |
+| `genre_queue` | v1 | Genre search queue with offset |
+| `regional_seed_queue` | v2 | Regional Spotify search queries |
+| `track_candidates` | v3 | Staging area for unmatched external tracks |
+| `lastfm_seed_queue` | v3 | Last.fm tag/method pagination state |
+| `ytmusic_seed_queue` | v3 | YTMusic query queue |
+| `discogs_seed_queue` | v3 | Discogs style queue |
+| `artist_graph_queue` | v4 | BFS artist expansion queue (priority-ordered) |
+| `artist_processed_cache` | v4 | Processed artists (prevent re-processing) |
+| `album_processed_cache` | v4 | Processed albums (prevent re-processing) |
+| `deezer_seed_queue` | v5 | Deezer artist queue |
+| `itunes_seed_queue` | v6 | iTunes artist name queue |
 
 ---
 
 ## Troubleshooting
 
 **Worker shows "no work available" immediately**
-- Check that the seeder completed successfully: `docker-compose logs seeder`
+- Check seeder completed: `docker-compose logs seeder`
 - Verify MongoDB is healthy: `docker-compose ps`
 
 **Spotify 403 on audio-features**
-- This endpoint is restricted on some API tiers. The worker handles it
-  gracefully — tracks still progress through the pipeline with null audio_features.
+- Expected — this endpoint is restricted on most developer app tiers. Tracks advance through the pipeline with `null` audio_features.
+
+**Spotify workers stalling for hours**
+- Ensure `SPOTIFY_MAX_RATE_LIMIT_SLEEP=60` is set (default). Without this cap, a single 429 with large `Retry-After` stalls all workers.
+- Lower `SPOTIFY_RATE_LIMIT_RPS` if 429s are frequent (default 3.0).
 
 **Genius low confidence / no lyrics**
-- Instrumental tracks, DJ mixes, and ambient music won't match Genius.
-  They still get scored and exported; `has_lyrics` will be `false`.
+- Instrumental tracks, DJ mixes, and ambient music won't match. They still get scored and exported.
 
-**Re-seeding after adding genres or playlists**
-- The seeder uses `$setOnInsert` — safe to re-run without duplicating.
+**MusicBrainz worker returns no matches for Cyrillic tracks**
+- `transliteration_worker` must run first to generate `transliterated_name`. MusicBrainz worker uses both original and transliterated names.
+
+**Language detection wrong for short names**
+- Short names (< 20 chars) cannot be reliably detected. MusicBrainz data overrides langdetect when available.
+
+**Discogs or MusicBrainz worker getting IP-banned**
+- These workers must run as **single replicas**. Scale to 2+ instances causes 1 req/s to be exceeded, resulting in bans.
+
+**iTunes 403 errors**
+- Expected at high request rates. Worker auto-backs off after `ITUNES_403_BACKOFF_AFTER` consecutive 403s. Reduce `ITUNES_RATE_LIMIT_RPS` if this happens frequently.
+
+**Re-seeding safely**
+- All seed workers use `$setOnInsert` — safe to restart without duplicating queue items.
 - `docker-compose restart seeder`
-
----
-
----
-
-# v2: Regional & MusicBrainz Extension
-
-## Overview
-
-v2 adds four supplementary workers that run **orthogonally** to the main pipeline:
-
-```
-Main pipeline (status-driven, unchanged):
-  base_collected → audio_features_added → lyrics_added → enriched
-
-v2 supplementary passes (flag-driven, non-blocking):
-  language_worker       → sets language, script, regions, mb_priority
-  transliteration_worker → sets normalized_name, transliterated_name
-  musicbrainz_worker    → sets musicbrainz{}, composers, lyricists, language
-  regional_seed_worker  → inserts regional tracks as base_collected
-```
-
-None of the v2 workers change the `status` field. They set their own boolean
-completion flags (`language_detected`, `transliteration_done`, `musicbrainz_enriched`)
-so they never interfere with the v1 pipeline state machine.
-
----
-
-## New Worker Architecture
-
-### `regional_seed_worker`
-Self-seeding on first run. Populates `regional_seed_queue` with targeted
-Spotify searches across 50+ regional queries covering:
-
-| Region | Countries | Sample Queries |
-|---|---|---|
-| Central Asia | UZ, KZ, KG, TJ, TM | `uzbek pop`, `kazakh hip hop`, `kyrgyz music` |
-| CIS | RU, UA, BY, AZ, GE, AM | `russian rap`, `ukrainian pop`, `shanson`, `estrada` |
-| MENA | AE, SA, EG, QA, MA, TR | `khaleeji`, `arabic hip hop`, `mahraganat`, `rai` |
-
-Pagination state is persisted in MongoDB (offset field) — crash-safe.
-
-### `language_worker`
-Runs on all tracks with `language_detected=False`. Source priority:
-1. **MusicBrainz** `text-representation.language` (authoritative)
-2. **Genius lyrics** text → `langdetect` (reliable, 500+ chars)
-3. **Track name + artist** → script detection (fallback, low confidence)
-
-Also classifies regional flags (`regions.cis`, `regions.central_asia`, `regions.mena`)
-and sets `mb_priority` for MusicBrainz queue ordering.
-
-### `transliteration_worker`
-Converts non-Latin track names to Latin script for:
-- Better MusicBrainz search recall (Genius/MB store names in Latin)
-- Cross-script deduplication
-- Downstream analytics
-
-| Script | Method |
-|---|---|
-| Russian/Ukrainian Cyrillic | `transliterate` package (BGN/PCGN tables) |
-| Uzbek Cyrillic | Custom mapping → official 1995 Uzbek Latin alphabet |
-| Arabic | Simplified ALA-LC romanization (in-house mapping) |
-| Georgian | `transliterate` package |
-| Armenian | `transliterate` package |
-
-### `musicbrainz_worker`
-Enriches tracks with composer, lyricist, release country, and canonical metadata.
-
-**Priority queue** (claimed first):
-
-| mb_priority | Region |
-|---|---|
-| 3 | Central Asia (UZ, KZ, KG, TJ, TM) |
-| 2 | CIS (RU, UA, BY, AZ, GE, AM, …) |
-| 1 | MENA (AE, SA, EG, QA, …) |
-| 0 | All other tracks |
-
-**Eligibility**: `musicbrainz_enriched=False` AND (`quality_score ≥ MB_PRIORITY_THRESHOLD` OR `mb_priority > 0`)
-
-Regional tracks are always enriched regardless of quality score.
-
-**⚠️ Rate limit**: Strictly 1 req/s. Run exactly **one** container instance.
-Do not scale this service horizontally.
-
----
-
-## New Data Fields
-
-### `tracks` collection additions
-
-```json
-{
-  "markets": ["UZ", "KZ", "RU", "AE", ...],
-
-  "musicbrainz": {
-    "mbid": "recording-uuid",
-    "canonical_title": "Official Track Title",
-    "aliases": ["Alternative Title", "..."],
-    "composers": ["Composer Name"],
-    "lyricists": ["Lyricist Name"],
-    "first_release_date": "2021-03-15",
-    "release_countries": ["UZ", "KZ"],
-    "labels": ["Label Name"],
-    "language": "uz",
-    "script": "latin",
-    "tags": ["uzbek pop", "central asian"]
-  },
-  "musicbrainz_confidence_score": 0.91,
-  "musicbrainz_enriched": true,
-
-  "language": "uz",
-  "script": "latin",
-  "language_source": "musicbrainz",
-  "language_detected": true,
-
-  "normalized_name": "kecha va kunduz",
-  "transliterated_name": "kecha va kunduz",
-  "normalized_artist_name": "sherzod",
-  "transliteration_done": true,
-
-  "regions": {
-    "cis": true,
-    "central_asia": true,
-    "mena": false,
-    "countries": ["KZ", "UZ"],
-    "artist_country": "UZ",
-    "artist_origin_region": "central_asia"
-  },
-
-  "mb_priority": 3,
-  "regional_score": 0.72,
-  "quality_score": 0.48
-}
-```
-
----
-
-## Regional Quality Scoring (v2)
-
-When `REGIONAL_BOOST_ENABLED=true`:
-
-```
-quality_score = (1 - REGIONAL_BOOST_WEIGHT) × base_score
-              + REGIONAL_BOOST_WEIGHT × regional_score
-
-regional_score =
-    market_overlap_with_target_regions  (0.0–0.5)
-    + language_match_bonus              (0.0–0.3)
-    + artist_country_match_bonus        (0.0–0.2)
-```
-
-With `REGIONAL_BOOST_WEIGHT=0.15`:
-- A Central Asian track with `regional_score=1.0` gets +15% to its score
-- A track with zero regional presence is penalized 15% of the weight
-- Set `REGIONAL_BOOST_ENABLED=false` to revert to v1 formula exactly
-
----
-
-## New Environment Variables (v2)
-
-| Variable | Default | Description |
-|---|---|---|
-| `MUSICBRAINZ_ENABLED` | `true` | Enable MusicBrainz enrichment |
-| `MUSICBRAINZ_USER_AGENT` | `MusicEnricher/1.0 (…)` | **Required by MusicBrainz** — use your email |
-| `MUSICBRAINZ_RATE_LIMIT_RPS` | `1.0` | **Do not increase** — MusicBrainz policy |
-| `MUSICBRAINZ_PRIORITY_THRESHOLD` | `0.3` | Min quality_score for non-regional tracks |
-| `MUSICBRAINZ_MIN_CONFIDENCE` | `0.75` | Min match confidence to store MB data |
-| `MUSICBRAINZ_DURATION_TOLERANCE_MS` | `3000` | ±ms for duration matching |
-| `TARGET_REGIONS` | `cis,central_asia,mena` | Regions to target |
-| `REGIONAL_BOOST_ENABLED` | `true` | Use regional scoring formula |
-| `REGIONAL_BOOST_WEIGHT` | `0.15` | Regional score weight (0–1) |
-| `REGIONAL_GENRE_MAX_OFFSET` | `500` | Regional search pagination limit |
-| `LANGUAGE_DETECTION_ENABLED` | `true` | Enable language_worker |
-| `LANGUAGE_MIN_TEXT_LEN` | `20` | Min chars for reliable langdetect |
-| `TRANSLITERATION_ENABLED` | `true` | Enable transliteration_worker |
-
----
-
-## New MongoDB Collections (v2)
-
-| Collection | Description |
-|---|---|
-| `regional_seed_queue` | Regional search queries with offset pagination |
-
----
-
-## New Indexes (v2)
-
-```
-tracks.language           — language_worker polling
-tracks.script             — transliteration routing
-tracks.language_detected  — language_worker polling
-tracks.musicbrainz_enriched + mb_priority — MB worker priority queue
-tracks.regions.cis        — regional analytics
-tracks.regions.central_asia
-tracks.regions.mena
-```
-
----
-
-## Running v2
-
-```bash
-# Start all workers including v2
-docker-compose up -d
-
-# Monitor MB enrichment progress
-docker-compose exec mongo mongosh music_enricher --eval '
-  db.tracks.aggregate([
-    {$group: {
-      _id: "$musicbrainz_enriched",
-      count: {$sum: 1}
-    }}
-  ]).toArray()
-'
-
-# Check regional distribution
-docker-compose exec mongo mongosh music_enricher --eval '
-  db.tracks.aggregate([
-    {$match: {"regions.central_asia": true}},
-    {$group: {_id: "$language", count: {$sum: 1}}},
-    {$sort: {count: -1}}
-  ]).toArray()
-'
-
-# Count tracks by script
-docker-compose exec mongo mongosh music_enricher --eval '
-  db.tracks.aggregate([
-    {$group: {_id: "$script", count: {$sum: 1}}},
-    {$sort: {count: -1}}
-  ]).toArray()
-'
-```
-
----
-
-## MusicBrainz API Notes
-
-- **No API key required** for read-only access
-- **User-Agent is mandatory** — set `MUSICBRAINZ_USER_AGENT` to include your contact
-- **Rate limit: 1 req/s** — strictly enforced. Exceeding it results in IP ban (24h+)
-- **ISRC lookup** is the most precise path — always used when ISRC is available
-- **Fuzzy matching** combines title similarity (65%), artist similarity (20%), duration (15%)
-- **Confidence threshold** (`MUSICBRAINZ_MIN_CONFIDENCE=0.75`) prevents false matches
-
----
-
-## Troubleshooting v2
-
-**MusicBrainz worker returns no matches for CIS tracks**
-- Cyrillic track names may not match MB's Latin-script index
-- The transliteration_worker must run first to generate `transliterated_name`
-- MB worker uses both original and transliterated names for search
-
-**Language detection wrong for short track names**
-- Very short names (< 4 chars) cannot be reliably detected
-- Set `LANGUAGE_MIN_TEXT_LEN=20` to require minimum text before detection
-- MusicBrainz data (if available) overrides langdetect results
-
-**Regional seed queue not populated**
-- regional_seed_worker self-seeds on first run
-- Check: `db.regional_seed_queue.countDocuments({})` — should be 180+ items
-- Restart the worker if count is 0: `docker-compose restart regional-seed-worker`
