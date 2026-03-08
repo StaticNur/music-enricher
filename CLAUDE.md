@@ -262,6 +262,62 @@ Copy `.env.example` to `.env`. All settings have defaults in `app/core/config.py
 - **Deezer placeholder spotify_id**: Tracks inserted by `deezer_direct_worker` or `itunes_worker` use `"deezer:{id}"` / `"itunes:{id}"` as placeholder. These are backfilled with real Spotify IDs when the same track is found via Spotify later.
 - **MongoDB DB name**: Production uses `MusicEnricher` (set via `MONGODB_DB` in `.env`). Default in config is `music_enricher` — ensure `.env` matches your actual DB.
 
+## Running without Spotify API
+
+If Spotify revokes API access (or for new deployments where Spotify credentials are unavailable), the pipeline continues to function via Deezer + iTunes + Last.fm + YTMusic + Discogs.
+
+### What still works
+
+| Worker | Status | Notes |
+|---|---|---|
+| `deezer_direct_worker` | ✅ Full BFS | genre → artists → related artists (Deezer `/artist/{id}/related`) → ∞ |
+| `itunes_worker` | ✅ | RSS charts 40+ countries + 200K+ artist search |
+| `lastfm_worker` | ✅ | Last.fm tag/chart top tracks |
+| `ytmusic_worker` | ✅ | YouTube Music charts and search |
+| `discogs_worker` | ✅ | Discogs genre/style releases |
+| `candidate_match_worker` | ✅ Deezer fallback | Set `SPOTIFY_ENABLED=false`, Deezer search takes over |
+| `audio_features_worker` | ✅ Status advancer | Gets 403 immediately, advances tracks with null audio_features |
+| `lyrics_worker` | ✅ | Genius, no Spotify dependency |
+| `quality_worker` | ✅ | MongoDB only |
+| `language_worker` | ✅ | langdetect, independent |
+| `transliteration_worker` | ✅ | Independent |
+| `musicbrainz_worker` | ✅ | Independent |
+
+### What to disable
+
+```yaml
+# docker-compose.override.yml — paste this when Spotify access is gone
+services:
+  seeder:
+    deploy:
+      replicas: 0
+  playlist-worker:
+    deploy:
+      replicas: 0
+  genre-worker:
+    deploy:
+      replicas: 0
+  artist-worker:
+    deploy:
+      replicas: 0
+  artist-graph-worker:
+    deploy:
+      replicas: 0
+  regional-seed-worker:
+    deploy:
+      replicas: 0
+  candidate-match-worker:
+    environment:
+      SPOTIFY_ENABLED: "false"
+```
+
+### Discovery capacity without Spotify
+
+- `deezer_direct_worker` BFS: ~90M tracks reachable (Deezer has full related-artists API unlike Spotify which deprecated it in Nov 2024)
+- `itunes_worker`: ~3M candidates per cycle from 200K+ artists
+- Last.fm + YTMusic + Discogs: additional millions of candidates
+- Regional coverage: Deezer has good CIS/MENA coverage through its own genre system; regional artists are reached naturally through BFS
+
 ## Network
 
 The compose stack joins the external `telegram-bot-network` (created by the parent infra repo). MongoDB is reachable at `MONGODB_URI` (set in `.env`).

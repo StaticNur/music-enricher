@@ -27,6 +27,8 @@ services:
     restart: on-failure
 
   # ── Playlist Worker ───────────────────────────────
+  # Requires Spotify API. Set replicas: 0 if Spotify access is revoked.
+  # Discovery continues via deezer-direct-worker + itunes-worker.
   playlist-worker:
     <<: *worker-common
     environment:
@@ -36,7 +38,7 @@ services:
         condition: service_started
 
   # ── Artist Expansion Worker ───────────────────────
-  # Rate-limited to keep pressure off the shared Spotify credential.
+  # Requires Spotify API. Set replicas: 0 if Spotify access is revoked.
   artist-worker:
     <<: *worker-common
     environment:
@@ -44,6 +46,7 @@ services:
       SPOTIFY_RATE_LIMIT_RPS: "1"
 
   # ── Genre Expansion Worker ────────────────────────
+  # Requires Spotify API. Set replicas: 0 if Spotify access is revoked.
   genre-worker:
     <<: *worker-common
     environment:
@@ -95,8 +98,9 @@ services:
   # ════════════════════════════════════════════════
 
   # ── Regional Seed Worker ──────────────────────────
-  # Self-seeding: bootstraps regional_seed_queue on first run,
-  # then processes regional search queries indefinitely.
+  # Requires Spotify API (market-specific search).
+  # Set replicas: 0 if Spotify access is revoked.
+  # Regional coverage still provided by deezer-direct-worker BFS.
   regional-seed-worker:
     <<: *worker-common
     environment:
@@ -191,6 +195,9 @@ services:
   # don't pile onto one credential — tune down if 429s reappear.
   # When Spotify API is cut off: set replicas to 0 (fully Spotify-dependent).
   # Discovery continues via deezer-direct-worker BFS at that point.
+  # Requires Spotify API. Set replicas: 0 if Spotify access is revoked.
+  # Deezer BFS (deezer-direct-worker) provides equivalent discovery
+  # without Spotify — same graph expansion, ~90M tracks reachable.
   artist-graph-worker:
     <<: *worker-common
     environment:
