@@ -179,7 +179,20 @@ class JioSaavnClient:
             logger.error("jiosaavn_get_playlist_failed", list_id=list_id, error=str(exc))
             return []
 
-        songs = data.get("songs") or data.get("list") or []
+        songs = (
+            data.get("songs")
+            or data.get("list")
+            or data.get("data", {}).get("songs")
+            or data.get("data", {}).get("list")
+            or []
+        )
+        # Newer JioSaavn API may return list as a JSON-encoded string
+        if isinstance(songs, str):
+            import json as _json
+            try:
+                songs = _json.loads(songs)
+            except Exception:
+                songs = []
         if not isinstance(songs, list):
             return []
 
@@ -213,7 +226,20 @@ class JioSaavnClient:
             return []
 
         # Search response: {"results": [...], "total": N}
-        results = data.get("results") or []
+        # Newer API may wrap in {"data": {"results": [...]}} or use "songs" key
+        results = (
+            data.get("results")
+            or data.get("songs")
+            or data.get("data", {}).get("results")
+            or data.get("data", {}).get("songs")
+            or []
+        )
+        if isinstance(results, str):
+            import json as _json
+            try:
+                results = _json.loads(results)
+            except Exception:
+                results = []
         if not isinstance(results, list):
             return []
 

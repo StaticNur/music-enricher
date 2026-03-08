@@ -77,8 +77,13 @@ class NeteaseMusicClient:
         try:
             from pyncm import apis  # type: ignore[import]
 
+            # pyncm >= 2.0 renamed apis.search → apis.cloudsearch
+            search_fn = getattr(apis, "cloudsearch", None) or getattr(apis, "search", None)
+            if search_fn is None:
+                raise AttributeError("pyncm has no cloudsearch or search module")
+
             result = await self._run_in_executor(
-                apis.search.GetSearchResult, query, 1, limit, offset
+                search_fn.GetSearchResult, query, 1, limit, offset
             )
             songs = result.get("result", {}).get("songs", [])
             return [t for t in (self._parse_song(s) for s in songs) if t]
