@@ -60,6 +60,9 @@ class AudioFeaturesWorker(BaseWorker):
         Batch size capped at AUDIO_FEATURES_BATCH_SIZE (100) to align
         with the Spotify batch endpoint limit.
         """
+        if self._spotify and self._spotify.is_circuit_open:
+            logger.warning("audio_features_worker_idle_circuit_open", reason="Spotify circuit breaker is OPEN — skipping claim")
+            return []
         col = self.db[TRACKS_COL]
         now = datetime.now(timezone.utc)
         effective_batch = min(self.settings.batch_size, AUDIO_FEATURES_BATCH_SIZE)

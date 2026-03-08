@@ -32,7 +32,7 @@ from tenacity import (
 )
 
 from app.core.config import Settings
-from app.utils.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
+from app.utils.circuit_breaker import CircuitBreaker, CircuitBreakerOpen, CircuitState
 from app.utils.rate_limiter import RateLimiter
 
 logger = structlog.get_logger(__name__)
@@ -117,6 +117,11 @@ class SpotifyClient:
             timeout=httpx.Timeout(30.0),
             limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
         )
+
+    @property
+    def is_circuit_open(self) -> bool:
+        """True when the Spotify circuit breaker is OPEN (all requests will fail fast)."""
+        return self._circuit.state == CircuitState.OPEN
 
     async def aclose(self) -> None:
         await self._http.aclose()

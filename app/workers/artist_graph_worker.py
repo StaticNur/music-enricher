@@ -284,6 +284,9 @@ class ArtistGraphWorker(BaseWorker):
         Uses ``locked_at`` for stale-lock recovery (same pattern as
         ``candidate_match_worker``, without a ``status`` enum).
         """
+        if self._spotify and self._spotify.is_circuit_open:
+            logger.warning("artist_graph_worker_idle_circuit_open", reason="Spotify circuit breaker is OPEN — skipping claim")
+            return []
         col = self.db[ARTIST_GRAPH_QUEUE_COL]
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(seconds=LOCK_TIMEOUT_SECONDS)

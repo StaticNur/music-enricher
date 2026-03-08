@@ -65,6 +65,9 @@ class GenreWorker(BaseWorker):
         each genre may require many API calls (pagination), and we want
         to release the lock and update the offset after each page.
         """
+        if self._spotify and self._spotify.is_circuit_open:
+            logger.warning("genre_worker_idle_circuit_open", reason="Spotify circuit breaker is OPEN — skipping claim")
+            return []
         col = self.db[GENRE_QUEUE_COL]
         now = datetime.now(timezone.utc)
 

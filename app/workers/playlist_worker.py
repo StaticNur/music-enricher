@@ -121,6 +121,9 @@ class PlaylistWorker(BaseWorker):
 
         Also reclaims stale locks (from crashed workers).
         """
+        if self._spotify and self._spotify.is_circuit_open:
+            logger.warning("playlist_worker_idle_circuit_open", reason="Spotify circuit breaker is OPEN — skipping claim")
+            return []
         col = self.db[PLAYLIST_QUEUE_COL]
         now = datetime.now(timezone.utc)
         batch = []

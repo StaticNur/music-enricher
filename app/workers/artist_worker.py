@@ -59,6 +59,10 @@ class ArtistWorker(BaseWorker):
     # ── Queue claiming ────────────────────────────────────────────────────────
 
     async def claim_batch(self) -> List[Dict[str, Any]]:
+        if self._spotify and self._spotify.is_circuit_open:
+            logger.warning("artist_worker_idle_circuit_open", reason="Spotify circuit breaker is OPEN — skipping claim")
+            return []
+
         col = self.db[ARTIST_QUEUE_COL]
         now = datetime.now(timezone.utc)
         batch = []
