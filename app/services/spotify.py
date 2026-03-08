@@ -111,6 +111,7 @@ class SpotifyClient:
             name="spotify",
             failure_threshold=settings.spotify_circuit_breaker_threshold,
             recovery_timeout=settings.spotify_circuit_breaker_timeout,
+            max_recovery_timeout=settings.spotify_circuit_breaker_max_timeout,
         )
         self._http = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0),
@@ -164,7 +165,7 @@ class SpotifyClient:
                     sleeping_for=sleep_for,
                 )
                 await asyncio.sleep(sleep_for)
-                await self._circuit.record_failure()
+                await self._circuit.record_failure(retry_after=float(retry_after))
                 raise SpotifyRateLimit(retry_after)
 
             if resp.status_code in (401, 403):
@@ -351,7 +352,10 @@ class SpotifyClient:
         """
         Fetch a single artist by Spotify ID.
 
-        Returns ``None`` on 404 (artist removed) or other errors.
+        Returns ``None`` on 404 (artist removed).
+        Raises ``CircuitBreakerOpen`` / ``RetryError`` on API unavailability so
+        callers can release the queue item for retry instead of discarding it.
+        Raises ``SpotifyError`` on other unrecoverable HTTP errors.
         """
         async def _fetch() -> Dict:
             return await self._get(f"/artists/{artist_id}")
@@ -363,10 +367,7 @@ class SpotifyClient:
                 logger.debug("artist_not_found", artist_id=artist_id)
                 return None
             logger.warning("get_artist_failed", artist_id=artist_id, error=str(exc))
-            return None
-        except Exception as exc:
-            logger.warning("get_artist_failed", artist_id=artist_id, error=str(exc))
-            return None
+            raise
 
     async def get_related_artists(self, artist_id: str) -> List[Dict]:
         """

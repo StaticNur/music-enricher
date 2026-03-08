@@ -36,8 +36,10 @@ class Settings(BaseSettings):
     spotify_max_rate_limit_sleep: int = Field(default=60)
     # Circuit breaker: open after this many consecutive 429/5xx/network errors
     spotify_circuit_breaker_threshold: int = Field(default=5)
-    # Circuit breaker: seconds to wait in OPEN state before probing again
+    # Circuit breaker: default seconds to wait in OPEN state before probing again
     spotify_circuit_breaker_timeout: float = Field(default=120.0)
+    # Circuit breaker: max seconds to stay OPEN when Retry-After hint is provided
+    spotify_circuit_breaker_max_timeout: float = Field(default=3600.0)
 
     # ── Genius API ───────────────────────────────────────────────────────────
     genius_access_token: str = Field(default="")

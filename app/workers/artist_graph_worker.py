@@ -26,6 +26,7 @@ artists (high Spotify popularity + followers) are processed before obscure ones.
 """
 from __future__ import annotations
 
+import asyncio
 import math
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
@@ -34,6 +35,7 @@ import structlog
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import DESCENDING, UpdateOne
 from pymongo.errors import BulkWriteError
+from tenacity import RetryError
 
 from app.core.config import Settings
 from app.db.collections import (
@@ -52,6 +54,7 @@ from app.models.track import (
     AlbumRef,
 )
 from app.services.spotify import SpotifyClient
+from app.utils.circuit_breaker import CircuitBreakerOpen
 from app.utils.deduplication import compute_fingerprint, extract_isrc
 from app.workers.base import BaseWorker, WORKER_INSTANCE_ID, LOCK_TIMEOUT_SECONDS
 
@@ -400,6 +403,22 @@ class ArtistGraphWorker(BaseWorker):
                 albums_processed=albums_processed,
                 new_artists_enqueued=new_artists_enqueued,
             )
+
+        except (CircuitBreakerOpen, RetryError) as exc:
+            # Transient Spotify API unavailability (429 / circuit open).
+            # Release the lock so the item can be retried later — no retry_count
+            # penalty, because the artist itself is not the problem.
+            logger.warning(
+                "artist_graph_api_unavailable",
+                artist_id=artist_id,
+                depth=depth,
+                error=str(exc),
+            )
+            await col.update_one(
+                {"artist_id": artist_id},
+                {"$set": {"locked_at": None, "locked_by": None, "updated_at": now}},
+            )
+            await asyncio.sleep(30)
 
         except Exception as exc:
             logger.error(

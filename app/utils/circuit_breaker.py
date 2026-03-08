@@ -58,16 +58,20 @@ class CircuitBreaker:
         name: str,
         failure_threshold: int = 5,
         recovery_timeout: float = 120.0,
+        max_recovery_timeout: float = 3600.0,
     ) -> None:
         """
         Args:
             name: Human-readable name used in log lines.
             failure_threshold: Consecutive failures before opening the circuit.
-            recovery_timeout: Seconds to wait in OPEN state before probing again.
+            recovery_timeout: Default seconds to wait in OPEN state before probing.
+            max_recovery_timeout: Upper cap when caller supplies a Retry-After hint.
         """
         self.name = name
         self._threshold = failure_threshold
         self._timeout = recovery_timeout
+        self._max_timeout = max_recovery_timeout
+        self._active_timeout = recovery_timeout  # updated per-open based on Retry-After
         self._state = CircuitState.CLOSED
         self._failures = 0
         self._opened_at: float = 0.0
@@ -99,9 +103,17 @@ class CircuitBreaker:
         """Record a successful call — decrements failure count, closes HALF_OPEN."""
         await self._on_success()
 
-    async def record_failure(self) -> None:
-        """Record a failed call — may open the circuit."""
-        await self._on_failure()
+    async def record_failure(self, retry_after: Optional[float] = None) -> None:
+        """Record a failed call — may open the circuit.
+
+        Args:
+            retry_after: Hint from the upstream API (e.g. Spotify ``Retry-After``
+                header value in seconds).  When provided, the circuit stays OPEN
+                for ``min(retry_after, max_recovery_timeout)`` seconds instead of
+                the default ``recovery_timeout``.  This prevents probe requests
+                from being sent while a known long-lived ban is in effect.
+        """
+        await self._on_failure(retry_after=retry_after)
 
     async def __aenter__(self) -> "CircuitBreaker":
         await self.check()
@@ -124,7 +136,7 @@ class CircuitBreaker:
     async def _maybe_transition(self) -> None:
         """Check if OPEN → HALF_OPEN transition is due (call inside lock)."""
         if self._state == CircuitState.OPEN:
-            if time.monotonic() - self._opened_at >= self._timeout:
+            if time.monotonic() - self._opened_at >= self._active_timeout:
                 self._state = CircuitState.HALF_OPEN
                 logger.info(
                     "circuit_breaker_half_open",
@@ -143,20 +155,24 @@ class CircuitBreaker:
                 # Gradually forgive old failures
                 self._failures = max(0, self._failures - 1)
 
-    async def _on_failure(self) -> None:
+    async def _on_failure(self, retry_after: Optional[float] = None) -> None:
         async with self._lock:
             self._failures += 1
             if self._state in (CircuitState.CLOSED, CircuitState.HALF_OPEN):
                 if self._failures >= self._threshold or self._state == CircuitState.HALF_OPEN:
                     self._state = CircuitState.OPEN
                     self._opened_at = time.monotonic()
+                    if retry_after is not None:
+                        self._active_timeout = min(retry_after, self._max_timeout)
+                    else:
+                        self._active_timeout = self._timeout
                     logger.warning(
                         "circuit_breaker_opened",
                         name=self.name,
                         failures=self._failures,
-                        recovery_in_seconds=self._timeout,
+                        recovery_in_seconds=self._active_timeout,
                     )
 
     def _seconds_until_recovery(self) -> float:
         elapsed = time.monotonic() - self._opened_at
-        return max(0.0, self._timeout - elapsed)
+        return max(0.0, self._active_timeout - elapsed)
