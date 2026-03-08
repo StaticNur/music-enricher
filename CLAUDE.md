@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-An autonomous music metadata enrichment pipeline targeting 10M–30M tracks. Discovers tracks via Spotify, Last.fm, YouTube Music, Discogs, Deezer, iTunes/Apple Music, **Yandex Music** and an artist collaboration graph, enriches them with quality scores, YouTube video IDs and supplementary metadata, and stores everything in MongoDB. All workers share a single Docker image; the `WORKER_TYPE` env var selects which worker runs.
+An autonomous music metadata enrichment pipeline targeting 10M–30M tracks. Discovers tracks via Spotify, Last.fm, YouTube Music, Discogs, Deezer, iTunes/Apple Music and Yandex Music, enriches them with quality scores, YouTube video IDs and supplementary metadata, and stores everything in MongoDB. All workers share a single Docker image; the `WORKER_TYPE` env var selects which worker runs.
+
+**Geographic scope**: The pipeline is **global** — tracks from any country/region can enter. Regional classification (`regions` field) is used to *boost* Eurasian tracks in quality scoring, not to exclude non-Eurasian tracks. A Billie Eilish track and a Nigerian Afrobeats track will both be collected; the Afrobeats track simply won't receive a regional boost (unless it's tagged as MENA-adjacent).
 
 ## Run tests
 
@@ -49,12 +51,25 @@ docker-compose exec mongo mongosh MusicEnricher --eval \
     albums: db.album_processed_cache.countDocuments({})
   })'
 
-# Deezer / iTunes queue progress
+# Deezer / iTunes / Yandex queue progress
 docker-compose exec mongo mongosh MusicEnricher --eval \
   'printjson({
-    deezer_pending: db.deezer_seed_queue.countDocuments({processed:false}),
-    itunes_pending: db.itunes_seed_queue.countDocuments({processed:false}),
-    candidates: db.track_candidates.countDocuments({processed:false})
+    deezer_pending:  db.deezer_seed_queue.countDocuments({processed:false}),
+    itunes_pending:  db.itunes_seed_queue.countDocuments({processed:false}),
+    yandex_pending:  db.yandex_seed_queue.countDocuments({processed:false}),
+    candidates:      db.track_candidates.countDocuments({processed:false})
+  })'
+
+# Regional breakdown (tracks classified per region)
+docker-compose exec mongo mongosh MusicEnricher --eval \
+  'printjson({
+    cis:            db.tracks.countDocuments({"regions.cis": true}),
+    central_asia:   db.tracks.countDocuments({"regions.central_asia": true}),
+    mena:           db.tracks.countDocuments({"regions.mena": true}),
+    eastern_europe: db.tracks.countDocuments({"regions.eastern_europe": true}),
+    south_asia:     db.tracks.countDocuments({"regions.south_asia": true}),
+    east_asia:      db.tracks.countDocuments({"regions.east_asia": true}),
+    southeast_asia: db.tracks.countDocuments({"regions.southeast_asia": true})
   })'
 ```
 
@@ -72,7 +87,7 @@ pip install -r requirements.txt  # if venv is fresh
 
 All workers are built from the same `Dockerfile`. `app/entrypoint.py` reads `WORKER_TYPE` and imports + runs the appropriate worker class. Every worker inherits from `BaseWorker` (`app/workers/base.py`), which provides the polling loop, optimistic locking, graceful shutdown (SIGTERM), and stale-lock recovery (locks older than 5 min are reclaimed automatically).
 
-22 worker types are registered in `app/entrypoint.py`.
+23 worker types are registered in `app/entrypoint.py`.
 
 ### Track state machine
 
@@ -111,8 +126,8 @@ Never change `status`. Run orthogonally on any track regardless of pipeline posi
 |---|---|---|
 | `language_worker` | `language_detected` | langdetect → script heuristic |
 | `transliteration_worker` | `transliteration_done` | Cyrillic/Arabic → Latin |
-| `musicbrainz_worker` | `musicbrainz_enriched` | MBID, composers, release data — **1 req/s, single replica only**. Priority queue: CIS > Central Asia > MENA > general |
-| `regional_seed_worker` | — | Self-seeds CIS/Central Asia/MENA search queries |
+| `musicbrainz_worker` | `musicbrainz_enriched` | MBID, composers, release data — **1 req/s, single replica only**. Priority: Central Asia (3) > CIS (2) > all other Eurasian regions (1) > global (0) |
+| `regional_seed_worker` | — | Eurasian market-scoped Spotify searches (7 regions, 31 markets) |
 
 ### v3 external-source discovery pipeline
 
@@ -179,28 +194,71 @@ Spotify, they backfill the real `spotify_id` via `$set` (not `$setOnInsert`).
 
 | Worker | Source | Notes |
 |---|---|---|
-| `deezer_direct_worker` | Deezer genre→artist→top tracks + albums | No auth, 8 rps, ~90M tracks |
+| `deezer_direct_worker` | Deezer genre→artist→top tracks + albums | No auth, 3 rps/instance, ~90M tracks. BFS via related artists. |
 
 Queue: `deezer_seed_queue` (one item per Deezer artist)
-Bootstrap: genre list → genre artists → populate queue → reset when exhausted.
+Bootstrap: global genre list + explicit Eurasian artist searches → queue → BFS expansion via related artists → reset when exhausted.
+
+**Rate limit**: Deezer allows 50 req/5s = 10 rps per IP. With N replicas, set `DEEZER_RATE_LIMIT_RPS = floor(10/N)`. Default: 3 replicas × 3 rps = 9 rps.
 
 ### v6 iTunes / Apple Music discovery
 
 Two-phase discovery. No authentication required.
 
 ```
-Phase 1: Apple Music RSS charts (40+ countries) → 5K–15K tracks per cycle
-Phase 2: iTunes artist search queue → 50K+ artists × 200 songs ≈ 3M candidates, ~1.5h per cycle at 8 rps
+Phase 1: Apple Music RSS charts (56 countries, full Eurasian coverage) → 5K–15K tracks per cycle
+Phase 2: iTunes artist search queue → 50K+ artists × 200 songs ≈ 3M candidates, ~1.5h per cycle at 18 rps (3 replicas × 6 rps)
 ```
 
 Inserts tracks as `base_collected` with `spotify_id="itunes:{trackId}"`. Deduplication via ISRC or fingerprint. Real `spotify_id` backfilled by `artist_graph_worker` or `candidate_match_worker` later.
 
 | Worker | Source | Notes |
 |---|---|---|
-| `itunes_worker` | iTunes Search API + Apple Music RSS Feeds | No auth. 2 replicas safe. 403 backoff: after 5 requests → sleep 300s |
+| `itunes_worker` | iTunes Search API + Apple Music RSS Feeds | No auth. 3 replicas, 6 rps each. 403 backoff: after 5 requests → sleep 300s |
 
 Queue: `itunes_seed_queue` (unique by `artist_name`)
 Bootstrap: RSS charts fetched on startup → artist names extracted → queue populated.
+
+### v7 Yandex Music CIS discovery
+
+Direct CIS-focused discovery. Requires a free Yandex account OAuth token (`YANDEX_MUSIC_TOKEN`). Worker is idle (no-op) if token is not set.
+
+```
+Phase 1: Top chart tracks for 9 CIS countries (ru, kz, by, uz, am, az, ge, ua, md)
+Phase 2: BFS via similar artists → full discography per artist
+```
+
+| Worker | Source | Notes |
+|---|---|---|
+| `yandex_worker` | Yandex Music charts + artist discographies | Free Yandex account token. 2 rps (unofficial API). Fingerprint-only dedup (no ISRC). |
+
+Queue: `yandex_seed_queue` (one item per Yandex artist ID)
+Placeholder: `spotify_id = "yandex:{id}"`. Backfilled by Spotify workers later.
+
+### v8 Eurasian regional classification
+
+Tracks are classified into 7 Eurasian regions based on three independent signals (OR-aggregated): Spotify markets, detected language, and MusicBrainz artist country.
+
+**This does NOT filter non-Eurasian tracks.** All tracks enter the pipeline regardless of origin. Regional classification only affects:
+1. `regional_score` component in `quality_worker` (weight: `REGIONAL_BOOST_WEIGHT=0.15`)
+2. `mb_priority` — MusicBrainz enrichment queue order
+
+| Region | Countries (sample) | Languages | MB Priority |
+|---|---|---|---|
+| `central_asia` | UZ, KZ, KG, TJ, TM, AF | uz, kk, ky, tg, tk | 3 (highest) |
+| `cis` | RU, UA, BY, AZ, AM, GE, MD, LV, LT, EE | ru, uk, be, az, hy, ka | 2 |
+| `mena` | AE, SA, EG, TR, IR, MA, PK... | ar, fa, he, ur, tr, ku | 1 |
+| `eastern_europe` | PL, RO, HU, CZ, BG, RS, GR... | pl, hu, ro, bg, sr, el | 1 |
+| `south_asia` | IN, BD, LK, NP, PK | hi, bn, ta, te, pa, si | 1 |
+| `east_asia` | CN, JP, KR, TW, MN | zh, ja, ko, mn | 1 |
+| `southeast_asia` | TH, VN, ID, MY, PH, SG... | th, vi, id, ms, tl | 1 |
+
+Quality formula with regional boost:
+```
+quality_score = (1 - REGIONAL_BOOST_WEIGHT) × base_score + REGIONAL_BOOST_WEIGHT × regional_score
+# base_score = 0.4×popularity + 0.3×followers + 0.2×appearances + 0.1×markets
+# regional_score = 0–1 based on market overlap + language match + artist country
+```
 
 ### Key modules
 
@@ -208,7 +266,7 @@ Bootstrap: RSS charts fetched on startup → artist names extracted → queue po
 |---|---|
 | `app/core/config.py` | Pydantic `Settings` — all config from env, no global state |
 | `app/db/collections.py` | Collection name constants + `ensure_indexes()` called at every startup |
-| `app/models/track.py` | `TrackDocument`, `TrackStatus`, `YoutubeData`, `ArtistRef`, `AlbumRef`, `MusicBrainzData`, `RegionData` |
+| `app/models/track.py` | `TrackDocument`, `TrackStatus`, `YoutubeData`, `ArtistRef`, `AlbumRef`, `MusicBrainzData`, `RegionData` (7 region flags) |
 | `app/models/candidate.py` | `CandidateDocument`, seed queue models (v3) |
 | `app/models/artist_graph.py` | `ArtistGraphItem`, `GraphSource`, `compute_artist_priority()` (v4) |
 | `app/models/artist.py` | `ArtistDocument` — Spotify artist metadata cache |
@@ -217,14 +275,15 @@ Bootstrap: RSS charts fetched on startup → artist names extracted → queue po
 | `app/services/lastfm.py` | Last.fm API client (httpx, 4 req/s) |
 | `app/services/ytmusic.py` | ytmusicapi wrapper (executor), `search_track_video()` for enrichment |
 | `app/services/discogs.py` | Discogs API client (httpx, 1 req/s) |
-| `app/services/deezer.py` | Deezer public API (httpx, 8 rps, no auth) |
-| `app/services/apple_music.py` | iTunes Search API + Apple Music RSS Feeds (8 rps, no auth) |
+| `app/services/deezer.py` | Deezer public API (httpx, configurable rps via `deezer_rate_limit_rps`, no auth) |
+| `app/services/apple_music.py` | iTunes Search API + Apple Music RSS Feeds (configurable rps, no auth) |
+| `app/services/yandex_music.py` | Yandex Music unofficial API (2 rps, free account token) |
 | `app/services/musicbrainz.py` | ISRC lookup + fuzzy matching |
 | `app/utils/rate_limiter.py` | Async token-bucket `RateLimiter` (one instance per API client) |
 | `app/utils/circuit_breaker.py` | CLOSED→OPEN→HALF_OPEN state machine for Spotify API |
 | `app/utils/deduplication.py` | `compute_fingerprint` (Spotify ID), `compute_candidate_fingerprint` (name) |
 | `app/utils/scoring.py` | Quality score formula, regional boost |
-| `app/utils/regional.py` | Regional scoring for CIS/Central Asia/MENA |
+| `app/utils/regional.py` | 7-region Eurasian classification: countries, languages, scoring, MB priority |
 | `app/utils/transliteration.py` | Cyrillic/Arabic → Latin |
 | `app/utils/signals.py` | SIGTERM/SIGINT shutdown event handler |
 
@@ -241,6 +300,7 @@ Copy `.env.example` to `.env`. All settings have defaults in `app/core/config.py
 | v3 | `YTMUSIC_*` | No token needed; ytmusicapi is unauthenticated |
 | v5 | — | No credentials — Deezer public API |
 | v6 | — | No credentials — iTunes Search API + Apple Music RSS |
+| v7 | `YANDEX_MUSIC_TOKEN` | Free Yandex account. Worker idle if not set. |
 
 ### Critical rate-limit constraints
 
@@ -248,7 +308,9 @@ Copy `.env.example` to `.env`. All settings have defaults in `app/core/config.py
 |---|---|---|
 | `discogs_worker` | 1 req/s | IP throttle / ban — **single replica only** |
 | `musicbrainz_worker` | 1 req/s | 24h+ IP ban — **single replica only** |
-| `itunes_worker` | 8 rps, 403 backoff | After 5 consecutive 403s: sleep 300s (configurable) |
+| `deezer_direct_worker` | 10 rps total per IP | Set `DEEZER_RATE_LIMIT_RPS = floor(10/N)` where N = replica count |
+| `itunes_worker` | ~8 rps per instance, 403 backoff | After 5 consecutive 403s: sleep 300s (configurable) |
+| `yandex_worker` | 2 rps per instance | Unofficial API — keep conservative |
 | All others | Configurable | Safe to scale horizontally |
 
 ## Known behaviours
@@ -259,19 +321,24 @@ Copy `.env.example` to `.env`. All settings have defaults in `app/core/config.py
 - **Spotify 429 sleep cap**: `spotify.py` caps `Retry-After` sleep to `SPOTIFY_MAX_RATE_LIMIT_SLEEP` (default 60s). Without this cap, a single 429 could stall all workers for hours. `SPOTIFY_RATE_LIMIT_RPS` defaults to 3.0 (was 10.0) to reduce 429 frequency.
 - **Spotify circuit breaker**: After 5 consecutive failures (429/5xx/network), the circuit opens for 120s. 401/403/404 do not count as failures. Prevents thundering herd on degraded API.
 - **`itunes_worker` 403 backoff**: iTunes returns 403 when rate-limited. Worker tracks consecutive 403s; after `ITUNES_403_BACKOFF_AFTER` (default 5), sleeps `ITUNES_403_BACKOFF_SECONDS` (default 300s).
-- **Deezer placeholder spotify_id**: Tracks inserted by `deezer_direct_worker` or `itunes_worker` use `"deezer:{id}"` / `"itunes:{id}"` as placeholder. These are backfilled with real Spotify IDs when the same track is found via Spotify later.
+- **Deezer placeholder spotify_id**: Tracks inserted by `deezer_direct_worker` use `"deezer:{id}"` as placeholder. Backfilled with real Spotify IDs when the same track is found via Spotify later.
+- **iTunes placeholder spotify_id**: `"itunes:{trackId}"` — same backfill mechanism.
+- **Yandex placeholder spotify_id**: `"yandex:{id}"` — same backfill mechanism. No ISRC from Yandex Music; fingerprint-only dedup.
+- **Deezer rate limit (per IP)**: Deezer allows 50 req/5s = 10 rps per IP. `DeezerClient` uses `settings.deezer_rate_limit_rps` (was hardcoded 8.0 — bug fixed). With 3 replicas set `DEEZER_RATE_LIMIT_RPS=3`.
+- **Non-Eurasian tracks**: Tracks from Africa, Latin America, Australia, Western Europe etc. enter the pipeline normally through all global sources (Spotify, Deezer BFS, Last.fm global tags, iTunes US/UK/AU/BR charts). They receive `regional_score=0` → `quality_score = 0.85 × base_score`. They are NOT filtered out.
 - **MongoDB DB name**: Production uses `MusicEnricher` (set via `MONGODB_DB` in `.env`). Default in config is `music_enricher` — ensure `.env` matches your actual DB.
 
 ## Running without Spotify API
 
-If Spotify revokes API access (or for new deployments where Spotify credentials are unavailable), the pipeline continues to function via Deezer + iTunes + Last.fm + YTMusic + Discogs.
+If Spotify revokes API access (or for new deployments where Spotify credentials are unavailable), the pipeline continues to function via Deezer + iTunes + Last.fm + YTMusic + Discogs + Yandex Music.
 
 ### What still works
 
 | Worker | Status | Notes |
 |---|---|---|
-| `deezer_direct_worker` | ✅ Full BFS | genre → artists → related artists (Deezer `/artist/{id}/related`) → ∞ |
-| `itunes_worker` | ✅ | RSS charts 40+ countries + 200K+ artist search |
+| `deezer_direct_worker` | ✅ Full BFS | genre → artists → related artists → ∞ (~90M tracks reachable) |
+| `itunes_worker` | ✅ | RSS charts 56 countries + 200K+ artist search |
+| `yandex_worker` | ✅ | CIS charts + BFS (requires `YANDEX_MUSIC_TOKEN`) |
 | `lastfm_worker` | ✅ | Last.fm tag/chart top tracks |
 | `ytmusic_worker` | ✅ | YouTube Music charts and search |
 | `discogs_worker` | ✅ | Discogs genre/style releases |
@@ -314,9 +381,9 @@ services:
 ### Discovery capacity without Spotify
 
 - `deezer_direct_worker` BFS: ~90M tracks reachable (Deezer has full related-artists API unlike Spotify which deprecated it in Nov 2024)
-- `itunes_worker`: ~3M candidates per cycle from 200K+ artists
+- `itunes_worker`: ~3M candidates per cycle from 200K+ artists, 56-country RSS charts
+- `yandex_worker`: CIS charts + BFS, millions of tracks (token required)
 - Last.fm + YTMusic + Discogs: additional millions of candidates
-- Regional coverage: Deezer has good CIS/MENA coverage through its own genre system; regional artists are reached naturally through BFS
 
 ## Network
 

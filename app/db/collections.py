@@ -127,6 +127,23 @@ async def _ensure_track_indexes(db: AsyncIOMotorDatabase) -> None:  # type: igno
             [("regions.mena", ASCENDING)],
             sparse=True, name="regions_mena_idx",
         ),
+        # ── Regional (v8: Eurasia expansion) ──────────────────────────────
+        IndexModel(
+            [("regions.eastern_europe", ASCENDING)],
+            sparse=True, name="regions_eastern_europe_idx",
+        ),
+        IndexModel(
+            [("regions.south_asia", ASCENDING)],
+            sparse=True, name="regions_south_asia_idx",
+        ),
+        IndexModel(
+            [("regions.east_asia", ASCENDING)],
+            sparse=True, name="regions_east_asia_idx",
+        ),
+        IndexModel(
+            [("regions.southeast_asia", ASCENDING)],
+            sparse=True, name="regions_southeast_asia_idx",
+        ),
         IndexModel([("mb_priority", DESCENDING)], name="mb_priority_idx"),
 
         # ── Compound: regional quality ranking ────────────────────────────
@@ -137,6 +154,10 @@ async def _ensure_track_indexes(db: AsyncIOMotorDatabase) -> None:  # type: igno
         IndexModel(
             [("regions.central_asia", ASCENDING), ("quality_score", DESCENDING)],
             sparse=True, name="central_asia_quality_idx",
+        ),
+        IndexModel(
+            [("regions.east_asia", ASCENDING), ("quality_score", DESCENDING)],
+            sparse=True, name="east_asia_quality_idx",
         ),
     ]
     await col.create_indexes(indexes)

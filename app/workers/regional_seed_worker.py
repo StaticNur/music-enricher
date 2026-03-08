@@ -101,22 +101,106 @@ REGIONAL_QUERIES: List[RegionalQuery] = [
     ("turkish pop",         "mena", "TR"),
     ("turkish hip hop",     "mena", "TR"),
     ("persian pop",         "mena", "IR"),
+    # ── Eastern Europe ───────────────────────────────────────────────────────
+    ("polish pop",          "eastern_europe", "PL"),
+    ("polish hip hop",      "eastern_europe", "PL"),
+    ("polish rap",          "eastern_europe", "PL"),
+    ("czech pop",           "eastern_europe", "CZ"),
+    ("slovak pop",          "eastern_europe", "SK"),
+    ("hungarian pop",       "eastern_europe", "HU"),
+    ("romanian pop",        "eastern_europe", "RO"),
+    ("romanian hip hop",    "eastern_europe", "RO"),
+    ("bulgarian pop",       "eastern_europe", "BG"),
+    ("serbian pop",         "eastern_europe", "RS"),
+    ("serbian rap",         "eastern_europe", "RS"),
+    ("croatian pop",        "eastern_europe", "HR"),
+    ("greek pop",           "eastern_europe", "GR"),
+    ("greek rap",           "eastern_europe", "GR"),
+    ("balkan music",        "eastern_europe", None),
+    ("balkan pop",          "eastern_europe", None),
+    ("turbo folk",          "eastern_europe", "RS"),
+    # ── South Asia ───────────────────────────────────────────────────────────
+    ("bollywood",           "south_asia", "IN"),
+    ("hindi pop",           "south_asia", "IN"),
+    ("hindi rap",           "south_asia", "IN"),
+    ("punjabi pop",         "south_asia", "IN"),
+    ("punjabi hip hop",     "south_asia", "IN"),
+    ("tamil pop",           "south_asia", "IN"),
+    ("telugu pop",          "south_asia", "IN"),
+    ("bangla music",        "south_asia", "BD"),
+    ("bangladeshi pop",     "south_asia", "BD"),
+    ("sinhala music",       "south_asia", "LK"),
+    ("nepali pop",          "south_asia", "NP"),
+    ("indian indie",        "south_asia", "IN"),
+    # ── East Asia ────────────────────────────────────────────────────────────
+    ("mandopop",            "east_asia", "TW"),
+    ("cantopop",            "east_asia", "HK"),
+    ("chinese pop",         "east_asia", "CN"),
+    ("chinese hip hop",     "east_asia", "CN"),
+    ("j-pop",               "east_asia", "JP"),
+    ("j-rock",              "east_asia", "JP"),
+    ("j-rap",               "east_asia", "JP"),
+    ("city pop",            "east_asia", "JP"),
+    ("k-pop",               "east_asia", "KR"),
+    ("k-rap",               "east_asia", "KR"),
+    ("k-indie",             "east_asia", "KR"),
+    ("mongolian music",     "east_asia", "MN"),
+    ("mongolian pop",       "east_asia", "MN"),
+    # ── Southeast Asia ───────────────────────────────────────────────────────
+    ("thai pop",            "southeast_asia", "TH"),
+    ("thai hip hop",        "southeast_asia", "TH"),
+    ("thai rap",            "southeast_asia", "TH"),
+    ("vietnamese pop",      "southeast_asia", "VN"),
+    ("vpop",                "southeast_asia", "VN"),
+    ("v-pop",               "southeast_asia", "VN"),
+    ("opm",                 "southeast_asia", "PH"),
+    ("p-pop",               "southeast_asia", "PH"),
+    ("philippine pop",      "southeast_asia", "PH"),
+    ("indonesian pop",      "southeast_asia", "ID"),
+    ("dangdut",             "southeast_asia", "ID"),
+    ("malay pop",           "southeast_asia", "MY"),
+    ("singapore pop",       "southeast_asia", "SG"),
+    ("myanmar music",       "southeast_asia", "MM"),
 ]
 
 # Market-only searches (no genre keyword — just popular tracks per market)
 MARKET_SEARCHES: List[Tuple[str, str]] = [
+    # Central Asia
     ("UZ", "central_asia"),
     ("KZ", "central_asia"),
     ("KG", "central_asia"),
     ("TJ", "central_asia"),
+    # CIS
     ("AZ", "cis"),
     ("GE", "cis"),
     ("AM", "cis"),
+    # MENA
     ("AE", "mena"),
     ("SA", "mena"),
     ("EG", "mena"),
     ("QA", "mena"),
     ("KW", "mena"),
+    # Eastern Europe
+    ("PL", "eastern_europe"),
+    ("RO", "eastern_europe"),
+    ("HU", "eastern_europe"),
+    ("RS", "eastern_europe"),
+    ("BG", "eastern_europe"),
+    ("GR", "eastern_europe"),
+    # South Asia
+    ("IN", "south_asia"),
+    ("BD", "south_asia"),
+    # East Asia
+    ("JP", "east_asia"),
+    ("KR", "east_asia"),
+    ("TW", "east_asia"),
+    ("HK", "east_asia"),
+    # Southeast Asia
+    ("ID", "southeast_asia"),
+    ("TH", "southeast_asia"),
+    ("PH", "southeast_asia"),
+    ("VN", "southeast_asia"),
+    ("MY", "southeast_asia"),
 ]
 
 MARKET_KEYWORDS = [
@@ -220,8 +304,12 @@ class RegionalSeedWorker(BaseWorker):
         col = self.db[REGIONAL_SEED_QUEUE_COL]
         now = datetime.now(timezone.utc)
 
-        # Priority order: central_asia > cis > mena > others
-        for region in ["central_asia", "cis", "mena", None]:
+        # Priority order: niche/underrepresented first
+        for region in [
+            "central_asia", "cis", "mena",
+            "east_asia", "south_asia", "southeast_asia", "eastern_europe",
+            None,
+        ]:
             filter_q: Dict[str, Any] = {
                 "$or": [
                     {"status": QueueStatus.PENDING.value},
@@ -418,9 +506,15 @@ class RegionalSeedWorker(BaseWorker):
         )
 
         mb_priority = compute_mb_priority(
-            regions={"central_asia": region == "central_asia",
-                     "cis": region == "cis",
-                     "mena": region == "mena"},
+            regions={
+                "central_asia":   region == "central_asia",
+                "cis":            region == "cis",
+                "mena":           region == "mena",
+                "eastern_europe": region == "eastern_europe",
+                "south_asia":     region == "south_asia",
+                "east_asia":      region == "east_asia",
+                "southeast_asia": region == "southeast_asia",
+            },
             language=None,
             markets=markets_list,
         )

@@ -150,16 +150,27 @@ class RegionData(BaseModel):
     Flags are OR-aggregated: a track is ``cis=True`` if it appears in
     CIS markets OR its language is a CIS language OR the primary artist
     is from a CIS country.
+
+    All fields default to False / None so existing MongoDB documents
+    remain fully readable without migration.
     """
+    # Post-Soviet / CIS
     cis: bool = False
     central_asia: bool = False
+    # Middle East & North Africa
     mena: bool = False
+    # Eurasian expansion (v8)
+    eastern_europe: bool = False   # PL, CZ, HU, RO, BG, RS, HR, GR, ...
+    south_asia: bool = False       # IN, BD, LK, NP, PK, ...
+    east_asia: bool = False        # CN, JP, KR, TW, MN, ...
+    southeast_asia: bool = False   # TH, VN, ID, MY, PH, SG, ...
+
     countries: List[str] = Field(default_factory=list)  # ISO-3166-1 alpha-2
 
     # From MusicBrainz artist relations
-    artist_country: Optional[str] = None         # e.g. "UZ", "KZ", "AE"
-    artist_begin_area: Optional[str] = None      # city/region of origin
-    artist_origin_region: Optional[str] = None   # "central_asia", "cis", "mena"
+    artist_country: Optional[str] = None
+    artist_begin_area: Optional[str] = None
+    artist_origin_region: Optional[str] = None  # region name string
 
 
 # ── Main document ─────────────────────────────────────────────────────────────

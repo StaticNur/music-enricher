@@ -69,11 +69,25 @@ LASTFM_TAGS: List[str] = [
     # MENA
     "arabic", "arabic pop", "arabic hip hop", "khaleeji", "mahrajan",
     "turkish", "turkish pop", "turkish rock", "turkish rap",
-    "persian", "iranian pop", "afro house",
-    # South & East Asia (broader coverage)
-    "hindi", "bollywood pop", "punjabi", "bhojpuri",
-    "mandopop", "cantopop", "thai pop", "vietnamese pop",
-    "indonesian pop", "opm",
+    "persian", "iranian pop",
+    # Eastern Europe
+    "polish pop", "polish hip-hop", "czech pop", "slovak pop",
+    "hungarian pop", "romanian pop", "romanian hip-hop",
+    "bulgarian pop", "serbian pop", "greek pop", "greek hip-hop",
+    "balkan", "turbofolk", "balkan pop",
+    # South Asia
+    "hindi", "bollywood", "bollywood pop", "punjabi", "punjabi pop",
+    "bhojpuri", "tamil pop", "telugu pop", "bangla music",
+    "indian indie", "nepali pop", "sinhala music",
+    # East Asia
+    "mandopop", "cantopop", "chinese pop", "chinese hip-hop",
+    "j-pop", "j-rock", "j-rap", "city pop",
+    "k-pop", "k-rap", "k-indie", "korean pop",
+    "mongolian music",
+    # Southeast Asia
+    "thai pop", "thai hip-hop", "vietnamese pop", "v-pop",
+    "opm", "p-pop", "indonesian pop", "dangdut",
+    "malay pop", "myanmar music",
 ]
 
 # Seed items: (tag, method). Empty tag means the global chart.

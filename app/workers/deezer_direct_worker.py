@@ -49,20 +49,26 @@ logger = structlog.get_logger(__name__)
 # CIS/Central Asia/MENA artist search queries to explicitly seed the Deezer BFS.
 # The global genre seed covers ~1400 mostly Western artists; these queries
 # inject CIS artists at bootstrap so BFS reaches the region within the first cycle.
-_CIS_SEED_QUERIES: List[str] = [
-    # Russian (Latin + Cyrillic)
-    "русский рэп", "русская поп", "русский рок", "шансон", "русский хип-хоп",
-    "russian rap", "russian pop", "russian rock",
-    # Ukrainian
-    "українська поп", "ukrainian pop",
-    # Kazakh
-    "казахская музыка", "kazakh music", "kazakh pop",
-    # Uzbek
-    "o'zbek pop", "uzbek music",
-    # Azerbaijani / Armenian / Georgian
-    "azerbaijani music", "armenian pop", "georgian music",
-    # Central Asia broad
-    "central asian music",
+# Eurasian artist search queries to bootstrap Deezer BFS with regional seeds.
+# Covers the full Eurasian scope so regional artists enter the graph in cycle 1.
+_EURASIAN_SEED_QUERIES: List[str] = [
+    # Russian / CIS
+    "русский рэп", "русская поп", "русский рок", "шансон",
+    "russian rap", "russian pop", "ukrainian pop", "georgian music",
+    "armenian pop", "azerbaijani music",
+    # Central Asia
+    "казахская музыка", "kazakh pop", "o'zbek pop", "uzbek music",
+    # MENA
+    "arabic pop", "khaleeji", "turkish pop", "persian pop",
+    # Eastern Europe
+    "polish pop", "romanian pop", "greek pop", "balkan pop",
+    "serbian rap", "hungarian pop", "bulgarian pop",
+    # South Asia
+    "bollywood", "hindi pop", "punjabi pop", "tamil pop", "bangla music",
+    # East Asia
+    "mandopop", "cantopop", "j-pop", "k-pop", "chinese pop",
+    # Southeast Asia
+    "thai pop", "vietnamese pop", "opm", "indonesian pop", "malay pop",
 ]
 
 
@@ -156,18 +162,19 @@ class DeezerDirectWorker(BaseWorker):
 
     async def _seed_cis_artists(self) -> None:
         """
-        Search Deezer for CIS/Central Asia artists and add them directly to the queue.
+        Search Deezer for Eurasian artists and add them directly to the queue.
 
         The global genre seed populates ~1400 mostly Western artists; this step
-        explicitly injects CIS artists at bootstrap so the BFS graph reaches the
-        region within the first processing cycle instead of depth 3–4.
+        explicitly injects artists from CIS, MENA, East Asia, South Asia, SE Asia
+        and Eastern Europe at bootstrap so the BFS graph reaches these regions
+        within the first processing cycle instead of depth 3–4.
         """
         assert self._deezer is not None
         col = self.db[DEEZER_SEED_QUEUE_COL]
         now = datetime.now(timezone.utc)
         ops: List[Any] = []
 
-        for query in _CIS_SEED_QUERIES:
+        for query in _EURASIAN_SEED_QUERIES:
             artists = await self._deezer.search_artists(query, limit=25)
             for artist in artists:
                 artist_id = artist.get("id")

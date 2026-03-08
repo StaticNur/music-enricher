@@ -88,8 +88,11 @@ class Settings(BaseSettings):
     musicbrainz_duration_tolerance_ms: int = Field(default=3000)
 
     # ── Regional targeting ────────────────────────────────────────────────────
-    # Comma-separated: cis,central_asia,mena
-    target_regions: str = Field(default="cis,central_asia,mena")
+    # Comma-separated Eurasian region names.
+    # Available: cis, central_asia, mena, eastern_europe, south_asia, east_asia, southeast_asia
+    target_regions: str = Field(
+        default="cis,central_asia,mena,eastern_europe,south_asia,east_asia,southeast_asia"
+    )
     regional_boost_enabled: bool = Field(default=True)
     # Weight of regional_score in the final quality formula (0–1)
     regional_boost_weight: float = Field(default=0.15)

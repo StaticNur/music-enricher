@@ -42,17 +42,24 @@ APPLE_RSS_BASE = "https://rss.marketingtools.apple.com/api/v2"
 # Chart types available via Apple RSS
 CHART_TYPES = ["most-played", "hot-tracks", "new-music"]
 
-# Countries to pull charts from — global majors + CIS/MENA/Central Asia focus
+# Countries to pull Apple Music RSS charts from — full Eurasian coverage.
 CHART_COUNTRIES = [
     # Global majors
-    "us", "gb", "de", "fr", "jp", "br", "au", "ca", "mx", "es",
-    "it", "nl", "se", "no", "pl", "pt", "ar", "co", "kr", "za",
+    "us", "gb", "de", "fr", "au", "ca", "mx", "br", "za",
     # CIS
-    "ru", "ua", "kz", "by", "uz", "ge", "am", "az",
+    "ru", "ua", "kz", "by", "uz", "ge", "am", "az", "md",
+    # Central Asia
+    "tj", "kg",
     # MENA
-    "sa", "ae", "eg", "ma", "dz", "iq", "tn", "lb", "qa", "kw",
-    # Central Asia + rest of world
-    "in", "tr", "id", "th", "ph", "ng", "cn", "tw",
+    "sa", "ae", "eg", "ma", "dz", "iq", "tn", "lb", "qa", "kw", "tr", "ir",
+    # Eastern Europe
+    "pl", "ro", "hu", "cz", "sk", "bg", "rs", "hr", "gr",
+    # South Asia
+    "in", "bd", "lk", "np", "pk",
+    # East Asia
+    "jp", "kr", "tw", "hk", "cn", "mn",
+    # Southeast Asia
+    "id", "th", "ph", "vn", "my", "sg", "mm",
 ]
 
 
