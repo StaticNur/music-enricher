@@ -45,6 +45,16 @@ ITUNES_SEED_QUEUE_COL = "itunes_seed_queue"
 # v7: Yandex Music CIS discovery (no Spotify required; token needed)
 YANDEX_SEED_QUEUE_COL = "yandex_seed_queue"
 
+# v8: Shazam chart discovery (no auth required; 77 countries)
+SHAZAM_SEED_QUEUE_COL = "shazam_seed_queue"
+
+# v9: JioSaavn Indian music discovery
+JIOSAAVN_SEED_QUEUE_COL = "jiosaavn_seed_queue"
+# v9: NetEase Cloud Music Chinese music discovery
+NETEASE_SEED_QUEUE_COL = "netease_seed_queue"
+# v9: SoundCloud independent music discovery
+SOUNDCLOUD_SEED_QUEUE_COL = "soundcloud_seed_queue"
+
 
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
     """
@@ -61,6 +71,10 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type
     await _ensure_deezer_indexes(db)
     await _ensure_itunes_indexes(db)
     await _ensure_yandex_indexes(db)
+    await _ensure_shazam_indexes(db)
+    await _ensure_jiosaavn_indexes(db)
+    await _ensure_netease_indexes(db)
+    await _ensure_soundcloud_indexes(db)
     logger.info("indexes_ensured")
 
 
@@ -334,5 +348,70 @@ async def _ensure_yandex_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ign
         IndexModel(
             [("processed", ASCENDING), ("locked_at", ASCENDING)],
             name="processed_locked_idx",
+        ),
+    ])
+
+
+async def _ensure_shazam_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Create indexes for v8 Shazam chart discovery queue."""
+    col = db[SHAZAM_SEED_QUEUE_COL]
+    await col.create_indexes([
+        # One document per country
+        IndexModel([("country_code", ASCENDING)], unique=True, name="country_code_unique"),
+        # Worker polling: countries whose next_run_at is due, not locked
+        IndexModel(
+            [("next_run_at", ASCENDING), ("locked_at", ASCENDING)],
+            name="next_run_locked_idx",
+        ),
+    ])
+
+
+async def _ensure_jiosaavn_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Create indexes for v9 JioSaavn Indian music discovery queue."""
+    col = db[JIOSAAVN_SEED_QUEUE_COL]
+    await col.create_indexes([
+        # Unique key: (item_type, item_id)
+        IndexModel(
+            [("item_type", ASCENDING), ("item_id", ASCENDING)],
+            unique=True, name="item_type_item_id_unique",
+        ),
+        # Worker polling: unprocessed, not locked
+        IndexModel(
+            [("processed", ASCENDING), ("locked_at", ASCENDING)],
+            name="processed_locked_idx",
+        ),
+    ])
+
+
+async def _ensure_netease_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Create indexes for v9 NetEase Cloud Music Chinese discovery queue."""
+    col = db[NETEASE_SEED_QUEUE_COL]
+    await col.create_indexes([
+        # Unique key: (item_type, item_id)
+        IndexModel(
+            [("item_type", ASCENDING), ("item_id", ASCENDING)],
+            unique=True, name="item_type_item_id_unique",
+        ),
+        # Worker polling: unprocessed, not locked
+        IndexModel(
+            [("processed", ASCENDING), ("locked_at", ASCENDING)],
+            name="processed_locked_idx",
+        ),
+    ])
+
+
+async def _ensure_soundcloud_indexes(db: AsyncIOMotorDatabase) -> None:  # type: ignore[type-arg]
+    """Create indexes for v9 SoundCloud independent music discovery queue."""
+    col = db[SOUNDCLOUD_SEED_QUEUE_COL]
+    await col.create_indexes([
+        # Unique key: (item_type, item_id)
+        IndexModel(
+            [("item_type", ASCENDING), ("item_id", ASCENDING)],
+            unique=True, name="item_type_item_id_unique",
+        ),
+        # Worker polling (next_run_at pattern, same as Shazam)
+        IndexModel(
+            [("next_run_at", ASCENDING), ("locked_at", ASCENDING)],
+            name="next_run_locked_idx",
         ),
     ])

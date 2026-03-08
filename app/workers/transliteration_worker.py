@@ -40,8 +40,23 @@ from app.workers.base import BaseWorker, WORKER_INSTANCE_ID
 
 logger = structlog.get_logger(__name__)
 
-# Scripts that require transliteration
-_TRANSLITERABLE_SCRIPTS = {"cyrillic", "arabic", "georgian", "armenian"}
+# Scripts that require transliteration (all non-Latin scripts we can handle)
+_TRANSLITERABLE_SCRIPTS = {
+    # Slavic / Caucasian (via transliterate package)
+    "cyrillic", "georgian", "armenian",
+    # Middle East / Central Asia
+    "arabic",
+    # East Asian
+    "cjk",       # Chinese → Pinyin (pypinyin)
+    "japanese",  # Japanese mixed Kana/Kanji → Romaji (pykakasi)
+    "hiragana",  # Hiragana only → Romaji (pykakasi)
+    "katakana",  # Katakana only → Romaji (pykakasi)
+    "hangul",    # Korean → Revised Romanization (unidecode)
+    # South / Southeast Asian
+    "devanagari",  # Hindi, Marathi, Nepali → ITRANS (unidecode)
+    "indic",       # Tamil, Telugu, Bengali, etc. (unidecode)
+    "thai",        # Thai → phonetic Latin (unidecode)
+}
 
 # Concurrency for CPU-bound transliteration
 _TRANSLIT_CONCURRENCY = 20

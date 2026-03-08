@@ -46,3 +46,11 @@ ytmusicapi>=1.7.0
 
 # v7: Yandex Music CIS discovery (unofficial API, free Yandex account required)
 yandex-music>=2.0.0
+
+# v9: Chinese music discovery (NetEase Cloud Music)
+pyncm>=2.0.0
+
+# v9: CJK/Indic transliteration
+pypinyin>=0.47.0
+pykakasi>=2.2.0
+unidecode>=1.3.8

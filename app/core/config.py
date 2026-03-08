@@ -192,6 +192,32 @@ class Settings(BaseSettings):
     # Comma-separated CIS country codes to fetch charts from.
     yandex_music_chart_countries: str = Field(default="ru,kz,by,uz,am,az,ge,ua,md")
 
+    # ── Shazam chart discovery (v8) ───────────────────────────────────────────
+    # Public Shazam discovery API — no authentication required.
+    # 77 countries × ≤200 tracks = up to 15 400 tracks per cycle.
+    # Conservative rate: 1–2 rps (undocumented limit).
+    shazam_rate_limit_rps: float = Field(default=1.5)
+    # Hours between re-fetching each country's chart (charts update daily).
+    shazam_cycle_hours: int = Field(default=24)
+
+    # ── JioSaavn discovery (v9) ───────────────────────────────────────────────
+    # Public API, no auth required.
+    jiosaavn_rate_limit_rps: float = Field(default=3.0)
+    jiosaavn_batch_size: int = Field(default=5)
+    jiosaavn_max_search_pages: int = Field(default=5)
+
+    # ── NetEase Cloud Music discovery (v9) ────────────────────────────────────
+    # Uses pyncm library. No auth required for public content.
+    netease_rate_limit_rps: float = Field(default=2.0)
+    netease_batch_size: int = Field(default=3)
+
+    # ── SoundCloud discovery (v9) ─────────────────────────────────────────────
+    # Requires client_id (auto-discovered from web JS or set via env var).
+    # Worker is idle if client_id cannot be obtained.
+    soundcloud_client_id: str = Field(default="")
+    soundcloud_rate_limit_rps: float = Field(default=2.0)
+    soundcloud_cycle_hours: int = Field(default=12)
+
     @property
     def yandex_music_chart_countries_list(self) -> list[str]:
         return [c.strip() for c in self.yandex_music_chart_countries.split(",") if c.strip()]

@@ -1,6 +1,6 @@
 # Music Metadata Enrichment Pipeline
 
-Autonomous data-harvesting system that collects and enriches **10M–30M music tracks** from multiple sources — Spotify, Last.fm, YouTube Music, Discogs, Deezer, iTunes/Apple Music — stores everything in **MongoDB**, and runs fully unattended. All workers share a single Docker image; `WORKER_TYPE` selects which one runs.
+Autonomous data-harvesting system that collects and enriches **10M–30M music tracks** from multiple sources — Spotify, Last.fm, YouTube Music, Discogs, Deezer, iTunes/Apple Music, Yandex Music, Shazam, JioSaavn, NetEase Cloud Music, SoundCloud — stores everything in **MongoDB**, and runs fully unattended. All workers share a single Docker image; `WORKER_TYPE` selects which one runs.
 
 ---
 
@@ -26,6 +26,14 @@ Autonomous data-harvesting system that collects and enriches **10M–30M music t
 │  v5  deezer_direct_worker (Deezer, no auth) ──────────────→  tracks    │
 │                                                                         │
 │  v6  itunes_worker (iTunes API + Apple Music RSS) ────────→  tracks    │
+│                                                                         │
+│  v7  yandex_worker (Yandex Music, CIS charts + BFS) ──────→  tracks    │
+│                                                                         │
+│  v8  shazam_worker (77 countries × 200 tracks/cycle) ─────→  tracks    │
+│                                                                         │
+│  v9  jiosaavn_worker  (Indian music, no auth) ─────────────→  tracks    │
+│      netease_worker   (Chinese music, pyncm) ──────────────→  tracks    │
+│      soundcloud_worker (independent, auto client_id) ──────→  tracks    │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
                                   │
@@ -74,7 +82,7 @@ Workers use **`findOneAndUpdate`** with optimistic locking:
 
 ---
 
-## Workers (22 total)
+## Workers (27 total)
 
 ### v1 — Core pipeline
 
@@ -94,9 +102,9 @@ Workers use **`findOneAndUpdate`** with optimistic locking:
 | Worker | Flag set | Notes |
 |---|---|---|
 | `language_worker` | `language_detected` | langdetect → script heuristic. Source priority: MusicBrainz → Genius lyrics → track name |
-| `transliteration_worker` | `transliteration_done` | Cyrillic/Arabic/Georgian/Armenian → Latin |
+| `transliteration_worker` | `transliteration_done` | Cyrillic/Arabic/CJK/Japanese/Korean/Devanagari/Indic/Thai → Latin. Falls back to original string if library unavailable |
 | `musicbrainz_worker` | `musicbrainz_enriched` | MBID, composers, release countries. Priority: CIS > Central Asia > MENA > general. **1 req/s, single replica only** |
-| `regional_seed_worker` | — | Self-seeds regional_seed_queue with CIS/Central Asia/MENA Spotify queries |
+| `regional_seed_worker` | — | Self-seeds regional_seed_queue with Eurasian Spotify queries (7 regions, 31 markets) |
 
 ### v3 — External-source discovery
 
@@ -164,6 +172,45 @@ Placeholder `spotify_id="itunes:{trackId}"`, backfilled later. 403 backoff: afte
 
 New collection: `itunes_seed_queue`
 
+### v7 — Yandex Music CIS discovery
+
+Direct CIS-focused discovery. Requires a free Yandex account OAuth token (`YANDEX_MUSIC_TOKEN`). Worker is idle (no-op) if token is not set.
+
+| Phase | Source | Scale |
+|---|---|---|
+| Phase 1 | Top chart tracks for 9 CIS countries | ru, kz, by, uz, am, az, ge, ua, md |
+| Phase 2 | BFS via similar artists → full discography | Millions of CIS tracks per cycle |
+
+Placeholder `spotify_id="yandex:{id}"`, fingerprint-only dedup (no ISRC from Yandex Music).
+
+New collection: `yandex_seed_queue`
+
+### v8 — Shazam chart discovery
+
+Global chart discovery, no authentication required.
+
+| Worker | Countries | Scale | Cycle |
+|---|---|---|---|
+| `shazam_worker` | 77 countries | ~15 400 tracks per cycle | Every 24 hours |
+
+Placeholder `spotify_id="shazam:{key}"`. ISRC dedup (~95% of chart tracks have ISRC). `next_run_at` scheduling pattern (one queue item per country).
+
+New collection: `shazam_seed_queue`
+
+### v9 — JioSaavn / NetEase / SoundCloud
+
+Three new Spotify-independent discovery sources, all no-auth.
+
+| Worker | Source | Coverage | Notes |
+|---|---|---|---|
+| `jiosaavn_worker` | JioSaavn public API | Indian music: Hindi, Punjabi, Tamil, Telugu, Bengali + 10 more | 2 replicas. Fingerprint-only dedup |
+| `netease_worker` | NetEase Cloud Music (pyncm) | Chinese music: charts, search, artist BFS | **1 replica** — pyncm uses global session state |
+| `soundcloud_worker` | SoundCloud genre charts + search | Independent/global: 14 genres × trending+top + 20 search queries | client_id auto-discovered from SoundCloud JS bundles |
+
+Placeholders: `"jiosaavn:{id}"`, `"netease:{id}"`, `"soundcloud:{id}"`.
+
+New collections: `jiosaavn_seed_queue`, `netease_seed_queue`, `soundcloud_seed_queue`
+
 ---
 
 ## Project Structure
@@ -188,16 +235,21 @@ music-enricher/
 │   │   ├── lastfm.py                   # Last.fm API (httpx, 4 rps)
 │   │   ├── ytmusic.py                  # ytmusicapi wrapper (async executor)
 │   │   ├── discogs.py                  # Discogs API (httpx, 1 rps)
-│   │   ├── deezer.py                   # Deezer public API (httpx, 8 rps, no auth)
-│   │   ├── apple_music.py             # iTunes Search API + Apple Music RSS
+│   │   ├── deezer.py                   # Deezer public API (httpx, configurable rps, no auth)
+│   │   ├── apple_music.py             # iTunes Search API + Apple Music RSS (56 countries)
+│   │   ├── yandex_music.py            # Yandex Music unofficial API (2 rps, token required)
+│   │   ├── shazam.py                   # Shazam discovery API (77 countries, no auth)
+│   │   ├── jiosaavn.py                 # JioSaavn public API (Indian music, no auth)
+│   │   ├── netease.py                  # NetEase Cloud Music via pyncm (Chinese music)
+│   │   ├── soundcloud.py              # SoundCloud (auto client_id from JS bundles)
 │   │   └── musicbrainz.py             # ISRC lookup + fuzzy matching
 │   ├── utils/
 │   │   ├── rate_limiter.py            # Async token-bucket RateLimiter
 │   │   ├── circuit_breaker.py         # CLOSED→OPEN→HALF_OPEN (Spotify)
 │   │   ├── deduplication.py           # compute_fingerprint + compute_candidate_fingerprint
 │   │   ├── scoring.py                  # Quality score + regional boost
-│   │   ├── regional.py                # Regional scoring (CIS / Central Asia / MENA)
-│   │   ├── transliteration.py         # Cyrillic/Arabic → Latin
+│   │   ├── regional.py                # Regional scoring (7 Eurasian regions)
+│   │   ├── transliteration.py         # Cyrillic/Arabic/CJK/Japanese/Korean/Devanagari/Thai → Latin
 │   │   └── signals.py                  # SIGTERM/SIGINT graceful shutdown
 │   ├── workers/
 │   │   ├── base.py                     # BaseWorker: polling loop, locking, stale-lock recovery
@@ -220,8 +272,13 @@ music-enricher/
 │   │   ├── artist_graph_worker.py      # v4
 │   │   ├── youtube_enrichment_worker.py # v4
 │   │   ├── deezer_direct_worker.py     # v5
-│   │   └── itunes_worker.py            # v6
-│   └── entrypoint.py                   # WORKER_TYPE dispatch (22 workers)
+│   │   ├── itunes_worker.py            # v6
+│   │   ├── yandex_worker.py            # v7
+│   │   ├── shazam_worker.py            # v8
+│   │   ├── jiosaavn_worker.py          # v9
+│   │   ├── netease_worker.py           # v9
+│   │   └── soundcloud_worker.py        # v9
+│   └── entrypoint.py                   # WORKER_TYPE dispatch (27 workers)
 ├── tests/
 │   └── test_candidate.py              # normalize_text, fingerprint, circuit breaker, service parsers
 ├── docker-compose.yml
@@ -239,18 +296,20 @@ music-enricher/
 
 - Docker ≥ 24
 - Docker Compose ≥ 2.20
-- Spotify Developer account → [developer.spotify.com](https://developer.spotify.com/dashboard)
+- Spotify Developer account → [developer.spotify.com](https://developer.spotify.com/dashboard) *(optional — pipeline works without Spotify)*
 - Genius API token → [genius.com/api-clients](https://genius.com/api-clients) (optional — pipeline advances without it)
 - Last.fm API key → [last.fm/api/account/create](https://www.last.fm/api/account/create) (for v3)
 - Discogs personal access token → [discogs.com/settings/developers](https://www.discogs.com/settings/developers) (for v3; optional — 25 rps without auth)
+- Yandex Music token — free Yandex account OAuth token (for v7 CIS discovery; optional)
 
 ### 2. Configure
 
 ```bash
 cp .env.example .env
-# Required: SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
-# Optional: GENIUS_ACCESS_TOKEN, LASTFM_API_KEY, DISCOGS_TOKEN
+# Required for Spotify mode: SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
+# Optional: GENIUS_ACCESS_TOKEN, LASTFM_API_KEY, DISCOGS_TOKEN, YANDEX_MUSIC_TOKEN
 # Set MONGODB_DB=MusicEnricher (production convention)
+# No-Spotify mode: all v5–v9 workers run without any credentials
 ```
 
 ### 3. Launch
@@ -286,12 +345,22 @@ docker-compose exec mongo mongosh MusicEnricher --eval \
     albums: db.album_processed_cache.countDocuments({})
   })'
 
-# Deezer / iTunes queue progress
+# Discovery queue progress
 docker-compose exec mongo mongosh MusicEnricher --eval \
   'printjson({
-    deezer_pending: db.deezer_seed_queue.countDocuments({processed:false}),
-    itunes_pending: db.itunes_seed_queue.countDocuments({processed:false}),
-    candidates: db.track_candidates.countDocuments({processed:false})
+    deezer_pending:    db.deezer_seed_queue.countDocuments({processed:false}),
+    itunes_pending:    db.itunes_seed_queue.countDocuments({processed:false}),
+    yandex_pending:    db.yandex_seed_queue.countDocuments({processed:false}),
+    jiosaavn_pending:  db.jiosaavn_seed_queue.countDocuments({processed:false}),
+    netease_pending:   db.netease_seed_queue.countDocuments({processed:false}),
+    candidates:        db.track_candidates.countDocuments({processed:false})
+  })'
+
+# Shazam / SoundCloud cycle status (next_run_at pattern)
+docker-compose exec mongo mongosh MusicEnricher --eval \
+  'printjson({
+    shazam_due:     db.shazam_seed_queue.countDocuments({next_run_at:{$lte:new Date()}}),
+    soundcloud_due: db.soundcloud_seed_queue.countDocuments({next_run_at:{$lte:new Date()}})
   })'
 ```
 
@@ -384,12 +453,50 @@ Workers catch SIGTERM, finish the current batch, then exit. Resume anytime with 
 
 | Variable | Default | Description |
 |---|---|---|
-| `ITUNES_RATE_LIMIT_RPS` | `4.0` | iTunes Search API requests/second |
-| `ITUNES_BATCH_SIZE` | `10` | Artists processed per iteration |
+| `ITUNES_RATE_LIMIT_RPS` | `6.0` | iTunes Search API requests/second |
+| `ITUNES_BATCH_SIZE` | `20` | Artists processed per iteration |
 | `ITUNES_SEED_ARTIST_LIMIT` | `200000` | Max artists per queue cycle |
 | `ITUNES_SKIP_IF_TRACKS_GTE` | `50` | Skip artist if already has ≥N tracks |
 | `ITUNES_403_BACKOFF_AFTER` | `5` | Consecutive 403s before sleep |
 | `ITUNES_403_BACKOFF_SECONDS` | `300` | Seconds to sleep after 403 backoff |
+
+### Yandex Music (v7)
+
+| Variable | Default | Description |
+|---|---|---|
+| `YANDEX_MUSIC_TOKEN` | — | Free Yandex account OAuth token. Worker idle if not set |
+| `YANDEX_MUSIC_RATE_LIMIT_RPS` | `2.0` | Unofficial API — keep conservative |
+| `YANDEX_MUSIC_CHART_COUNTRIES` | `ru,kz,by,uz,am,az,ge,ua,md` | CIS countries to fetch charts from |
+
+### Shazam (v8)
+
+| Variable | Default | Description |
+|---|---|---|
+| `SHAZAM_RATE_LIMIT_RPS` | `1.5` | Per-instance rate (2 replicas × 1.5 = 3 rps total) |
+| `SHAZAM_CYCLE_HOURS` | `24` | Hours between re-fetching each country's chart |
+
+### JioSaavn (v9)
+
+| Variable | Default | Description |
+|---|---|---|
+| `JIOSAAVN_RATE_LIMIT_RPS` | `3.0` | Per-instance rate limit |
+| `JIOSAAVN_BATCH_SIZE` | `5` | Queue items per iteration |
+| `JIOSAAVN_MAX_SEARCH_PAGES` | `5` | Max pages per search query (50 tracks/page) |
+
+### NetEase Cloud Music (v9)
+
+| Variable | Default | Description |
+|---|---|---|
+| `NETEASE_RATE_LIMIT_RPS` | `2.0` | Per-instance rate limit |
+| `NETEASE_BATCH_SIZE` | `3` | Queue items per iteration |
+
+### SoundCloud (v9)
+
+| Variable | Default | Description |
+|---|---|---|
+| `SOUNDCLOUD_CLIENT_ID` | — | Optional: set to skip auto-discovery from JS bundles |
+| `SOUNDCLOUD_RATE_LIMIT_RPS` | `2.0` | Per-instance rate limit |
+| `SOUNDCLOUD_CYCLE_HOURS` | `12` | Hours between re-fetching charts |
 
 ---
 
@@ -438,7 +545,10 @@ Each API client has its own async token-bucket limiter. On HTTP 429, the worker 
 |---|---|---|
 | `discogs_worker` | 1 req/s | IP throttle/ban — **single replica only** |
 | `musicbrainz_worker` | 1 req/s | 24h+ IP ban — **single replica only** |
-| `itunes_worker` | 8 rps + 403 backoff | 2 replicas safe |
+| `netease_worker` | 2 rps | **Single replica** — pyncm uses global session state |
+| `deezer_direct_worker` | 10 rps per IP total | Set `DEEZER_RATE_LIMIT_RPS = floor(10/N)` where N = replicas |
+| `itunes_worker` | ~8 rps + 403 backoff | 5 replicas safe at 6 rps each |
+| `shazam_worker` | ~3 rps total | 2 replicas at 1.5 rps each |
 | All others | Configurable | Safe to scale horizontally |
 
 ---
@@ -461,7 +571,7 @@ services:
       replicas: 3
 ```
 
-**Single-replica only**: `discogs-worker`, `musicbrainz-worker`.
+**Single-replica only**: `discogs-worker`, `musicbrainz-worker`, `netease-worker`.
 
 ---
 
@@ -485,6 +595,11 @@ services:
 | `album_processed_cache` | v4 | Processed albums (prevent re-processing) |
 | `deezer_seed_queue` | v5 | Deezer artist queue |
 | `itunes_seed_queue` | v6 | iTunes artist name queue |
+| `yandex_seed_queue` | v7 | Yandex Music artist queue |
+| `shazam_seed_queue` | v8 | Shazam country chart queue (`next_run_at` scheduling) |
+| `jiosaavn_seed_queue` | v9 | JioSaavn chart + search queue |
+| `netease_seed_queue` | v9 | NetEase playlist + artist queue |
+| `soundcloud_seed_queue` | v9 | SoundCloud chart + search queue (`next_run_at` scheduling) |
 
 ---
 
@@ -515,6 +630,19 @@ services:
 
 **iTunes 403 errors**
 - Expected at high request rates. Worker auto-backs off after `ITUNES_403_BACKOFF_AFTER` consecutive 403s. Reduce `ITUNES_RATE_LIMIT_RPS` if this happens frequently.
+
+**SoundCloud "no client_id" warning**
+- Worker logs `soundcloud_client_id_unavailable` and sleeps if client_id cannot be auto-discovered. Set `SOUNDCLOUD_CLIENT_ID` in `.env` to bypass JS bundle scraping.
+
+**NetEase returning empty results**
+- NetEase may require VPN or China-adjacent IP for some endpoints. Use 1 replica and verify connectivity.
+
+**Shazam 404 on a country**
+- Some countries are not supported by Shazam's discovery API. The worker logs `shazam_country_not_supported` and marks that country's queue item to skip next cycle.
+
+**Running without Spotify API**
+- Apply `docker-compose.override.yml` (already in repo): sets Spotify-dependent workers to 0 replicas, scales Deezer/iTunes/JioSaavn/Shazam/NetEase/SoundCloud.
+- `docker compose up -d` — override is applied automatically.
 
 **Re-seeding safely**
 - All seed workers use `$setOnInsert` — safe to restart without duplicating queue items.

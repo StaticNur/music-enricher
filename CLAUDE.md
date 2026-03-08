@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-An autonomous music metadata enrichment pipeline targeting 10M–30M tracks. Discovers tracks via Spotify, Last.fm, YouTube Music, Discogs, Deezer, iTunes/Apple Music and Yandex Music, enriches them with quality scores, YouTube video IDs and supplementary metadata, and stores everything in MongoDB. All workers share a single Docker image; the `WORKER_TYPE` env var selects which worker runs.
+An autonomous music metadata enrichment pipeline targeting 10M–30M tracks. Discovers tracks via Spotify, Last.fm, YouTube Music, Discogs, Deezer, iTunes/Apple Music, Yandex Music, Shazam, JioSaavn, NetEase Cloud Music, and SoundCloud. Enriches with quality scores, YouTube video IDs and supplementary metadata. Stores everything in MongoDB. All workers share a single Docker image; the `WORKER_TYPE` env var selects which worker runs.
 
 **Geographic scope**: The pipeline is **global** — tracks from any country/region can enter. Regional classification (`regions` field) is used to *boost* Eurasian tracks in quality scoring, not to exclude non-Eurasian tracks. A Billie Eilish track and a Nigerian Afrobeats track will both be collected; the Afrobeats track simply won't receive a regional boost (unless it's tagged as MENA-adjacent).
 
@@ -87,7 +87,7 @@ pip install -r requirements.txt  # if venv is fresh
 
 All workers are built from the same `Dockerfile`. `app/entrypoint.py` reads `WORKER_TYPE` and imports + runs the appropriate worker class. Every worker inherits from `BaseWorker` (`app/workers/base.py`), which provides the polling loop, optimistic locking, graceful shutdown (SIGTERM), and stale-lock recovery (locks older than 5 min are reclaimed automatically).
 
-23 worker types are registered in `app/entrypoint.py`.
+27 worker types are registered in `app/entrypoint.py`.
 
 ### Track state machine
 
@@ -125,7 +125,7 @@ Never change `status`. Run orthogonally on any track regardless of pipeline posi
 | Worker | Flag set | Notes |
 |---|---|---|
 | `language_worker` | `language_detected` | langdetect → script heuristic |
-| `transliteration_worker` | `transliteration_done` | Cyrillic/Arabic → Latin |
+| `transliteration_worker` | `transliteration_done` | Cyrillic/Arabic/CJK/Japanese/Korean/Devanagari/Indic/Thai → Latin. Returns original string if result is empty (library unavailable/failed) |
 | `musicbrainz_worker` | `musicbrainz_enriched` | MBID, composers, release data — **1 req/s, single replica only**. Priority: Central Asia (3) > CIS (2) > all other Eurasian regions (1) > global (0) |
 | `regional_seed_worker` | — | Eurasian market-scoped Spotify searches (7 regions, 31 markets) |
 
@@ -235,7 +235,53 @@ Phase 2: BFS via similar artists → full discography per artist
 Queue: `yandex_seed_queue` (one item per Yandex artist ID)
 Placeholder: `spotify_id = "yandex:{id}"`. Backfilled by Spotify workers later.
 
-### v8 Eurasian regional classification
+### v8 Shazam chart discovery
+
+Global chart discovery, no authentication required. 77 countries, up to 200 tracks per country = ~15 400 tracks per 24-hour cycle.
+
+```
+Queue: shazam_seed_queue — one item per country_code, next_run_at scheduling
+Worker claims: next_run_at <= now AND (locked_at null OR stale)
+After success: next_run_at = now + timedelta(hours=cycle_hours)
+```
+
+Dedup: ISRC preferred (~95% of chart tracks have ISRC). Fingerprint fallback: `sha256(norm_title | norm_artist | "shazam")` (no duration from Shazam API).
+Placeholder: `spotify_id = "shazam:{key}"`. Backfilled by Spotify workers later.
+
+| Worker | Notes |
+|---|---|
+| `shazam_worker` | 2 replicas at 1.5 rps each = 3 rps total. 77 countries bootstrapped on first startup |
+
+### v9 JioSaavn / NetEase / SoundCloud
+
+Three Spotify-independent discovery sources, all no-auth.
+
+**JioSaavn** (Indian music, 34 seed queries):
+- Direct public API, no token. Hindi, Punjabi, Tamil, Telugu, Bengali, Marathi, Gujarati, Kannada, Malayalam, Bhojpuri, Odia, Rajasthani, Haryanvi, Urdu
+- 2 item types: `chart` (direct chart), `search` (paginated, up to `jiosaavn_max_search_pages` pages)
+- Fingerprint-only dedup (no ISRC from JioSaavn). Placeholder: `"jiosaavn:{id}"`
+- Queue: `jiosaavn_seed_queue`
+
+**NetEase Cloud Music** (Chinese music):
+- Uses `pyncm` library. All synchronous calls dispatched via `run_in_executor`.
+- 3 item types: `playlist` (13 hardcoded chart IDs), `search` (offset-paginated), `artist` (BFS via related artists)
+- **Single replica only** — pyncm uses global session state.
+- Fingerprint strips CJK/full-width brackets: `（【…】）`. Placeholder: `"netease:{id}"`
+- Queue: `netease_seed_queue`
+
+**SoundCloud** (independent/global):
+- client_id auto-discovered from SoundCloud JS bundles via regex. Override with `SOUNDCLOUD_CLIENT_ID` env var.
+- 28 genre charts (14 genres × trending+top) + 20 search queries. `next_run_at` scheduling (12-hour cycle).
+- Worker is idle/no-op if client_id cannot be obtained after 3 attempts.
+- Placeholder: `"soundcloud:{id}"`. Queue: `soundcloud_seed_queue`
+
+| Worker | Limit | Notes |
+|---|---|---|
+| `jiosaavn_worker` | 3 rps | 2 replicas safe |
+| `netease_worker` | 2 rps | **Single replica** — global pyncm session |
+| `soundcloud_worker` | 2 rps | 1 replica recommended |
+
+### v8+ Eurasian regional classification
 
 Tracks are classified into 7 Eurasian regions based on three independent signals (OR-aggregated): Spotify markets, detected language, and MusicBrainz artist country.
 
@@ -278,13 +324,17 @@ quality_score = (1 - REGIONAL_BOOST_WEIGHT) × base_score + REGIONAL_BOOST_WEIGH
 | `app/services/deezer.py` | Deezer public API (httpx, configurable rps via `deezer_rate_limit_rps`, no auth) |
 | `app/services/apple_music.py` | iTunes Search API + Apple Music RSS Feeds (configurable rps, no auth) |
 | `app/services/yandex_music.py` | Yandex Music unofficial API (2 rps, free account token) |
+| `app/services/shazam.py` | Shazam discovery API (77 countries, configurable rps, no auth) |
+| `app/services/jiosaavn.py` | JioSaavn public API (Indian music, no auth, html.unescape) |
+| `app/services/netease.py` | NetEase Cloud Music via pyncm (Chinese music, sync→executor) |
+| `app/services/soundcloud.py` | SoundCloud (auto client_id from JS bundles, genre charts + search) |
 | `app/services/musicbrainz.py` | ISRC lookup + fuzzy matching |
 | `app/utils/rate_limiter.py` | Async token-bucket `RateLimiter` (one instance per API client) |
 | `app/utils/circuit_breaker.py` | CLOSED→OPEN→HALF_OPEN state machine for Spotify API |
 | `app/utils/deduplication.py` | `compute_fingerprint` (Spotify ID), `compute_candidate_fingerprint` (name) |
 | `app/utils/scoring.py` | Quality score formula, regional boost |
 | `app/utils/regional.py` | 7-region Eurasian classification: countries, languages, scoring, MB priority |
-| `app/utils/transliteration.py` | Cyrillic/Arabic → Latin |
+| `app/utils/transliteration.py` | Cyrillic/Arabic/CJK/Japanese/Korean/Devanagari/Indic/Thai → Latin. Returns original if result empty |
 | `app/utils/signals.py` | SIGTERM/SIGINT shutdown event handler |
 
 ## Configuration
@@ -293,7 +343,7 @@ Copy `.env.example` to `.env`. All settings have defaults in `app/core/config.py
 
 | Version | Required var | Notes |
 |---|---|---|
-| v1 | `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET` | Spotify Web API |
+| v1 | `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET` | Spotify Web API — optional if using no-Spotify mode |
 | v1 | `GENIUS_ACCESS_TOKEN` | Lyrics (optional in practice — pipeline advances without it) |
 | v3 | `LASTFM_API_KEY` | Free at last.fm/api/account/create |
 | v3 | `DISCOGS_TOKEN` | Personal access token from discogs.com/settings/developers — **not** Consumer Key/Secret (those are OAuth) |
@@ -301,6 +351,8 @@ Copy `.env.example` to `.env`. All settings have defaults in `app/core/config.py
 | v5 | — | No credentials — Deezer public API |
 | v6 | — | No credentials — iTunes Search API + Apple Music RSS |
 | v7 | `YANDEX_MUSIC_TOKEN` | Free Yandex account. Worker idle if not set. |
+| v8 | — | No credentials — Shazam discovery API |
+| v9 | — | JioSaavn, NetEase: no credentials. SoundCloud: `SOUNDCLOUD_CLIENT_ID` optional (auto-discovered) |
 
 ### Critical rate-limit constraints
 
@@ -308,9 +360,13 @@ Copy `.env.example` to `.env`. All settings have defaults in `app/core/config.py
 |---|---|---|
 | `discogs_worker` | 1 req/s | IP throttle / ban — **single replica only** |
 | `musicbrainz_worker` | 1 req/s | 24h+ IP ban — **single replica only** |
+| `netease_worker` | 2 rps | **Single replica** — pyncm global session state |
 | `deezer_direct_worker` | 10 rps total per IP | Set `DEEZER_RATE_LIMIT_RPS = floor(10/N)` where N = replica count |
-| `itunes_worker` | ~8 rps per instance, 403 backoff | After 5 consecutive 403s: sleep 300s (configurable) |
+| `itunes_worker` | ~6 rps per instance, 403 backoff | After 5 consecutive 403s: sleep 300s (configurable). 5 replicas |
 | `yandex_worker` | 2 rps per instance | Unofficial API — keep conservative |
+| `shazam_worker` | ~1.5 rps per instance | 2 replicas = 3 rps total |
+| `jiosaavn_worker` | 3 rps per instance | 2 replicas safe |
+| `soundcloud_worker` | 2 rps per instance | 1 replica recommended |
 | All others | Configurable | Safe to scale horizontally |
 
 ## Known behaviours
@@ -324,13 +380,19 @@ Copy `.env.example` to `.env`. All settings have defaults in `app/core/config.py
 - **Deezer placeholder spotify_id**: Tracks inserted by `deezer_direct_worker` use `"deezer:{id}"` as placeholder. Backfilled with real Spotify IDs when the same track is found via Spotify later.
 - **iTunes placeholder spotify_id**: `"itunes:{trackId}"` — same backfill mechanism.
 - **Yandex placeholder spotify_id**: `"yandex:{id}"` — same backfill mechanism. No ISRC from Yandex Music; fingerprint-only dedup.
-- **Deezer rate limit (per IP)**: Deezer allows 50 req/5s = 10 rps per IP. `DeezerClient` uses `settings.deezer_rate_limit_rps` (was hardcoded 8.0 — bug fixed). With 3 replicas set `DEEZER_RATE_LIMIT_RPS=3`.
-- **Non-Eurasian tracks**: Tracks from Africa, Latin America, Australia, Western Europe etc. enter the pipeline normally through all global sources (Spotify, Deezer BFS, Last.fm global tags, iTunes US/UK/AU/BR charts). They receive `regional_score=0` → `quality_score = 0.85 × base_score`. They are NOT filtered out.
+- **Shazam placeholder spotify_id**: `"shazam:{key}"` — same backfill mechanism. ~95% of chart tracks have ISRC, so dedup is mostly ISRC-based.
+- **JioSaavn placeholder spotify_id**: `"jiosaavn:{id}"` — fingerprint-only dedup (no ISRC).
+- **NetEase placeholder spotify_id**: `"netease:{id}"` — fingerprint-only dedup. CJK/full-width bracket stripping in `normalize_text` ensures proper fingerprinting.
+- **SoundCloud placeholder spotify_id**: `"soundcloud:{id}"` — fingerprint-only dedup. Duration already in milliseconds from SoundCloud API (no ×1000 conversion needed).
+- **Transliteration empty-string fallback**: If a transliteration library is not installed (e.g. local venv without `pypinyin`/`pykakasi`), the function returns the original string instead of an empty string. The `transliterated_name` field is never set to blank.
+- **Transliteration script coverage**: 12 scripts supported — cyrillic, arabic, georgian, armenian, cjk (→ Pinyin), japanese/hiragana/katakana (→ Romaji), hangul (→ Revised Romanization), devanagari, indic, thai (→ unidecode). Japanese detection unifies hiragana+katakana+kanji if >50% are Japanese chars.
+- **Deezer rate limit (per IP)**: Deezer allows 50 req/5s = 10 rps per IP. `DeezerClient` uses `settings.deezer_rate_limit_rps` (was hardcoded 8.0 — bug fixed). With 5 replicas set `DEEZER_RATE_LIMIT_RPS=2`.
+- **Non-Eurasian tracks**: Tracks from Africa, Latin America, Australia, Western Europe etc. enter the pipeline normally through all global sources (Spotify, Deezer BFS, Last.fm global tags, iTunes US/UK/AU/BR charts, SoundCloud, JioSaavn, NetEase, Shazam). They receive `regional_score=0` → `quality_score = 0.85 × base_score`. They are NOT filtered out.
 - **MongoDB DB name**: Production uses `MusicEnricher` (set via `MONGODB_DB` in `.env`). Default in config is `music_enricher` — ensure `.env` matches your actual DB.
 
 ## Running without Spotify API
 
-If Spotify revokes API access (or for new deployments where Spotify credentials are unavailable), the pipeline continues to function via Deezer + iTunes + Last.fm + YTMusic + Discogs + Yandex Music.
+If Spotify revokes API access (or for new deployments where Spotify credentials are unavailable), the pipeline continues to function via Deezer + iTunes + Yandex Music + Shazam + JioSaavn + NetEase + SoundCloud + Last.fm + YTMusic + Discogs.
 
 ### What still works
 
@@ -339,6 +401,10 @@ If Spotify revokes API access (or for new deployments where Spotify credentials 
 | `deezer_direct_worker` | ✅ Full BFS | genre → artists → related artists → ∞ (~90M tracks reachable) |
 | `itunes_worker` | ✅ | RSS charts 56 countries + 200K+ artist search |
 | `yandex_worker` | ✅ | CIS charts + BFS (requires `YANDEX_MUSIC_TOKEN`) |
+| `shazam_worker` | ✅ | 77 countries × 200 tracks, 24h cycle, no auth |
+| `jiosaavn_worker` | ✅ | Indian music, Hindi/Punjabi/Tamil/Telugu/Bengali + more |
+| `netease_worker` | ✅ | Chinese music charts + artist BFS (1 replica) |
+| `soundcloud_worker` | ✅ | Independent music, auto client_id |
 | `lastfm_worker` | ✅ | Last.fm tag/chart top tracks |
 | `ytmusic_worker` | ✅ | YouTube Music charts and search |
 | `discogs_worker` | ✅ | Discogs genre/style releases |
@@ -352,30 +418,13 @@ If Spotify revokes API access (or for new deployments where Spotify credentials 
 
 ### What to disable
 
-```yaml
-# docker-compose.override.yml — paste this when Spotify access is gone
-services:
-  seeder:
-    deploy:
-      replicas: 0
-  playlist-worker:
-    deploy:
-      replicas: 0
-  genre-worker:
-    deploy:
-      replicas: 0
-  artist-worker:
-    deploy:
-      replicas: 0
-  artist-graph-worker:
-    deploy:
-      replicas: 0
-  regional-seed-worker:
-    deploy:
-      replicas: 0
-  candidate-match-worker:
-    environment:
-      SPOTIFY_ENABLED: "false"
+`docker-compose.override.yml` is already committed to the repo — it's applied automatically by `docker compose up -d`. It disables all Spotify-dependent workers and scales the independent workers appropriately.
+
+To apply manually or verify:
+```bash
+docker compose up -d  # override applied automatically
+# Or explicitly:
+docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
 ```
 
 ### Discovery capacity without Spotify
@@ -383,6 +432,10 @@ services:
 - `deezer_direct_worker` BFS: ~90M tracks reachable (Deezer has full related-artists API unlike Spotify which deprecated it in Nov 2024)
 - `itunes_worker`: ~3M candidates per cycle from 200K+ artists, 56-country RSS charts
 - `yandex_worker`: CIS charts + BFS, millions of tracks (token required)
+- `shazam_worker`: ~15 400 chart tracks per 24h cycle, 77 countries
+- `jiosaavn_worker`: Indian music (Bollywood + regional), millions of tracks
+- `netease_worker`: Chinese music charts + BFS via related artists
+- `soundcloud_worker`: independent/global music, 28 genre charts + 20 search queries
 - Last.fm + YTMusic + Discogs: additional millions of candidates
 
 ## Network

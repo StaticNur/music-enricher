@@ -18,6 +18,13 @@ Available worker types:
     regional_seed_worker
     language_worker
     transliteration_worker
+    # v3: lastfm_worker, ytmusic_worker, discogs_worker, candidate_match_worker
+    # v4: artist_graph_worker, youtube_enrichment_worker
+    # v5: deezer_direct_worker
+    # v6: itunes_worker
+    # v7: yandex_worker
+    # v8: shazam_worker
+    # v9: jiosaavn_worker, netease_worker, soundcloud_worker
 
 Usage:
     WORKER_TYPE=playlist_worker python -m app.entrypoint
@@ -65,6 +72,12 @@ WORKER_TYPES = {
     "itunes_worker",
     # v7 Yandex Music CIS discovery (token needed, free account)
     "yandex_worker",
+    # v8 Shazam chart discovery (no auth required, 77 countries)
+    "shazam_worker",
+    # v9 new integrations
+    "jiosaavn_worker",
+    "netease_worker",
+    "soundcloud_worker",
 }
 
 
@@ -200,6 +213,34 @@ async def _run_worker(worker_type: str) -> None:
         elif worker_type == "yandex_worker":
             from app.workers.yandex_worker import YandexWorker
             worker = YandexWorker(db, settings)
+            await worker.run()
+
+        # ── v8: Shazam chart discovery (no auth required, 77 countries) ──────
+
+        elif worker_type == "shazam_worker":
+            from app.workers.shazam_worker import ShazamWorker
+            worker = ShazamWorker(db, settings)
+            await worker.run()
+
+        # ── v9: JioSaavn Indian music discovery (no auth required) ───────────
+
+        elif worker_type == "jiosaavn_worker":
+            from app.workers.jiosaavn_worker import JioSaavnWorker
+            worker = JioSaavnWorker(db, settings)
+            await worker.run()
+
+        # ── v9: NetEase Cloud Music Chinese discovery (pyncm, no auth) ───────
+
+        elif worker_type == "netease_worker":
+            from app.workers.netease_worker import NeteaseWorker
+            worker = NeteaseWorker(db, settings)
+            await worker.run()
+
+        # ── v9: SoundCloud independent music discovery (auto client_id) ──────
+
+        elif worker_type == "soundcloud_worker":
+            from app.workers.soundcloud_worker import SoundCloudWorker
+            worker = SoundCloudWorker(db, settings)
             await worker.run()
 
         else:

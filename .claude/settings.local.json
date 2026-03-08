@@ -7,7 +7,10 @@
       "Bash(.venv/Scripts/pip.exe install:*)",
       "Bash(.venv/Scripts/python.exe:*)",
       "Bash(.venv/Scripts/pip.exe show:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(docker compose:*)",
+      "Read(//mnt/c/Users/ZenBook/AppData/Local/Temp/**)",
+      "Read(//mnt/c/Users/ZenBook/AppData/Local/Temp/claude/M--business-quickly-download-bot-music-enricher/tasks/**)"
     ]
   }
 }

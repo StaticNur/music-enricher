@@ -25,6 +25,8 @@ services:
       WORKER_TYPE: seeder
     # Run once and exit — restart: on-failure so it re-seeds only if crashed
     restart: on-failure
+    deploy:
+      replicas: 1
 
   # ── Playlist Worker ───────────────────────────────
   # Requires Spotify API. Set replicas: 0 if Spotify access is revoked.
@@ -36,6 +38,8 @@ services:
     depends_on:
       seeder:
         condition: service_started
+    deploy:
+      replicas: 1
 
   # ── Artist Expansion Worker ───────────────────────
   # Requires Spotify API. Set replicas: 0 if Spotify access is revoked.
@@ -44,6 +48,8 @@ services:
     environment:
       WORKER_TYPE: artist_worker
       SPOTIFY_RATE_LIMIT_RPS: "1"
+    deploy:
+      replicas: 1
 
   # ── Genre Expansion Worker ────────────────────────
   # Requires Spotify API. Set replicas: 0 if Spotify access is revoked.
@@ -52,6 +58,8 @@ services:
     environment:
       WORKER_TYPE: genre_worker
       SPOTIFY_RATE_LIMIT_RPS: "1"
+    deploy:
+      replicas: 1
 
   # ── Audio Features Worker ─────────────────────────
   # Spotify returns 403 for /audio-features on most developer apps (deprecated).
@@ -65,7 +73,7 @@ services:
       WORKER_TYPE: audio_features_worker
       BATCH_SIZE: "200"
     deploy:
-      replicas: 8
+      replicas: 1
 
   # ── Lyrics Worker ─────────────────────────────────
   # Scale up to absorb the wave from audio_features_worker backlog.
@@ -75,7 +83,7 @@ services:
     environment:
       WORKER_TYPE: lyrics_worker
     deploy:
-      replicas: 5
+      replicas: 1
 
   # ── Quality Scoring Worker ────────────────────────
   # Pure MongoDB reads/writes — no external API. Scale freely.
@@ -84,7 +92,7 @@ services:
     environment:
       WORKER_TYPE: quality_worker
     deploy:
-      replicas: 6
+      replicas: 3
 
   # ── Exporter (runs on-demand or periodically) ─────
   exporter:
@@ -206,7 +214,7 @@ services:
       ARTIST_GRAPH_BATCH_SIZE: "5"
       ARTIST_GRAPH_MAX_APPEARS_ON: "20"
     deploy:
-      replicas: 3
+      replicas: 1
 
   # ── YouTube Enrichment Worker ─────────────────
   # Supplementary pass: searches YouTube Music for a video ID for
@@ -284,6 +292,72 @@ services:
     environment:
       WORKER_TYPE: yandex_worker
       # YANDEX_MUSIC_TOKEN: set in .env — get from free Yandex account
+    deploy:
+      replicas: 0
+
+  # ════════════════════════════════════════════════
+  # v8: Shazam Chart Discovery (no auth required)
+  # ════════════════════════════════════════════════
+
+  # ── Shazam Worker ─────────────────────────────
+  # Fetches top-200 chart tracks for 77 countries from Shazam's public API.
+  # Inserts directly into tracks (no Spotify required).
+  # ISRC available for ~95% of chart tracks → clean deduplication.
+  # Covers: CIS, MENA, East/South/SE Asia, Eastern Europe, LatAm, Africa.
+  # Cycle: 24 hours per country (charts update daily).
+  # 77 countries × ≤200 tracks = up to 15 400 new tracks per full cycle.
+  # 2 replicas × 1.5 rps = 3 countries/sec → full cycle in ~26 seconds.
+  shazam-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: shazam_worker
+      SHAZAM_RATE_LIMIT_RPS: "1.5"
+      SHAZAM_CYCLE_HOURS: "24"
+    deploy:
+      replicas: 2
+
+  # ════════════════════════════════════════════════
+  # v9: JioSaavn / NetEase / SoundCloud Discovery
+  # ════════════════════════════════════════════════
+
+  # ── JioSaavn Worker ───────────────────────────
+  # Indian music discovery: Bollywood + 9 regional languages.
+  # Public API, no auth required. 3 rps per instance.
+  # 2 replicas safe: no strict per-IP limit documented.
+  jiosaavn-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: jiosaavn_worker
+      JIOSAAVN_RATE_LIMIT_RPS: "3"
+    deploy:
+      replicas: 2
+
+  # ── NetEase Worker ────────────────────────────
+  # Chinese music discovery: 800M+ songs via pyncm.
+  # No auth required. Conservative 2 rps.
+  # Single replica: pyncm uses global session state.
+  netease-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: netease_worker
+      NETEASE_RATE_LIMIT_RPS: "2"
+    deploy:
+      replicas: 1
+
+  # ── SoundCloud Worker ─────────────────────────
+  # Independent/underground music: 300M+ tracks.
+  # Requires client_id (auto-discovered from web JS bundle).
+  # Worker is idle if client_id cannot be found.
+  # Single replica: SoundCloud throttles aggressively.
+  # Set SOUNDCLOUD_CLIENT_ID in .env to skip auto-discovery.
+  soundcloud-worker:
+    <<: *worker-common
+    environment:
+      WORKER_TYPE: soundcloud_worker
+      SOUNDCLOUD_RATE_LIMIT_RPS: "2"
+      # SOUNDCLOUD_CLIENT_ID: set in .env (auto-discovered if not set)
+    deploy:
+      replicas: 1
 
 networks:
   telegram-bot-network:
