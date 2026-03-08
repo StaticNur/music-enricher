@@ -48,7 +48,7 @@ ytmusicapi>=1.7.0
 yandex-music>=2.0.0
 
 # v9: Chinese music discovery (NetEase Cloud Music)
-pyncm>=2.0.0
+pyncm>=1.6.0
 
 # v9: CJK/Indic transliteration
 pypinyin>=0.47.0
