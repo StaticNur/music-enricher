@@ -55,11 +55,12 @@ class YandexMusicClient:
     # When any of these are detected, the client sets _banned=True and stops
     # sending further requests for the lifetime of this process.
     _BAN_SIGNALS = (
-        "401", "403", "429",
+        "401", "403", "429", "451",
         "unauthorized", "forbidden",
         "captcha", "blocked", "banned",
         "too many requests", "rate limit",
         "access denied",
+        "unavailable for legal reasons",
     )
 
     def __init__(self, settings: Settings) -> None:
