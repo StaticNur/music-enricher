@@ -11,7 +11,8 @@
       "Bash(docker compose:*)",
       "Read(//mnt/c/Users/ZenBook/AppData/Local/Temp/**)",
       "Read(//mnt/c/Users/ZenBook/AppData/Local/Temp/claude/M--business-quickly-download-bot-music-enricher/tasks/**)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(curl:*)"
     ]
   }
 }

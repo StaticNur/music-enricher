@@ -15,7 +15,7 @@ Rate limit: self-imposed 3 rps (no documented limit).
 Track data:
   - id: JioSaavn song ID → placeholder "jiosaavn:{id}"
   - title: song name
-  - more_info.primary_artists: comma-separated artist names (use first)
+  - more_info.artistMap.primary_artists: array of {id, name, ...} objects (use first name)
   - more_info.duration: seconds as string → duration_ms
   - more_info.language: "hindi", "punjabi", "tamil", etc.
   - No ISRC available → fingerprint dedup only
@@ -298,18 +298,32 @@ class JioSaavnClient:
 
         more_info: Dict[str, Any] = raw.get("more_info") or {}
 
-        # Primary artists (comma-separated string; use first one)
-        primary_artists_raw = (
-            more_info.get("primary_artists")
-            or more_info.get("artist")
-            or raw.get("primary_artists")
-            or raw.get("artist")
-            or ""
-        )
-        primary_artists_str = self._unescape(str(primary_artists_raw))
-        # Take the first artist (split on comma, strip, filter empty)
-        parts = [p.strip() for p in primary_artists_str.split(",") if p.strip()]
-        artist = parts[0] if parts else ""
+        # Primary artists — JioSaavn changed format:
+        # Old: more_info.primary_artists = "Artist1, Artist2" (string)
+        # New: more_info.artistMap.primary_artists = [{id, name, ...}, ...] (array)
+        artist = ""
+        artist_map: Dict[str, Any] = more_info.get("artistMap") or {}
+        primary_list = artist_map.get("primary_artists") or []
+        if isinstance(primary_list, list) and primary_list:
+            first = primary_list[0]
+            if isinstance(first, dict):
+                artist = self._unescape(first.get("name") or "")
+            elif isinstance(first, str):
+                artist = self._unescape(first)
+
+        if not artist:
+            # Fallback: old string format
+            primary_artists_raw = (
+                more_info.get("primary_artists")
+                or more_info.get("artist")
+                or raw.get("primary_artists")
+                or raw.get("artist")
+                or ""
+            )
+            primary_artists_str = self._unescape(str(primary_artists_raw))
+            parts = [p.strip() for p in primary_artists_str.split(",") if p.strip()]
+            artist = parts[0] if parts else ""
+
         if not artist:
             return None
 
