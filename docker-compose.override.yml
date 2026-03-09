@@ -18,27 +18,27 @@ services:
 
   seeder:
     deploy:
-      replicas: 0
+      replicas: 1
 
   playlist-worker:
     deploy:
-      replicas: 0
+      replicas: 1
 
   genre-worker:
     deploy:
-      replicas: 0
+      replicas: 1
 
   artist-worker:
     deploy:
-      replicas: 0
+      replicas: 1
 
   artist-graph-worker:
     deploy:
-      replicas: 0
+      replicas: 1
 
   regional-seed-worker:
     deploy:
-      replicas: 0
+      replicas: 1
 
   # ── Candidate match → Deezer-only режим ───────────────────────────────────
   # Deezer search заменяет Spotify search. Threshold 0.75 (вместо 0.8) чтобы
@@ -49,7 +49,7 @@ services:
       SPOTIFY_ENABLED: "false"
       CANDIDATE_MATCH_CONFIDENCE: "0.75"
     deploy:
-      replicas: 4
+      replicas: 1
 
   # ── Deezer BFS → масштабировать до 5 реплик ───────────────────────────────
   # IP limit Deezer = 10 rps. 5 реплик × 2 rps = 10 rps (точно в лимите).
@@ -60,7 +60,7 @@ services:
       DEEZER_TOP_TRACKS_LIMIT: "100"
       DEEZER_MAX_ALBUMS_PER_ARTIST: "50"
     deploy:
-      replicas: 5
+      replicas: 3
 
   # ── iTunes → масштабировать до 5 реплик ───────────────────────────────────
   # iTunes rate limit per-instance, не per-IP. 5 реплик безопасно.
@@ -70,7 +70,7 @@ services:
       ITUNES_RATE_LIMIT_RPS: "6"
       ITUNES_BATCH_SIZE: "20"
     deploy:
-      replicas: 5
+      replicas: 3
 
   # ── Last.fm → 2 реплики ───────────────────────────────────────────────────
   # 4 rps per-instance. 2 реплики = 8 rps — в рамках лимита Last.fm.
@@ -87,12 +87,12 @@ services:
   # После первого 403 от Spotify не делает API calls, только MongoDB updates.
   audio-features-worker:
     deploy:
-      replicas: 8
+      replicas: 1
 
   # ── Quality scoring → оставить 6 ─────────────────────────────────────────
   quality-worker:
     deploy:
-      replicas: 6
+      replicas: 1
 
   # ── JioSaavn (v9) ─────────────────────────────────────────────────────────
   # 2 реплики × 3 rps = 6 rps — нет задокументированного IP-лимита.
