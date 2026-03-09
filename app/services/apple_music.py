@@ -160,6 +160,45 @@ class AppleMusicClient:
             )
             return []
 
+    async def search_tracks(
+        self,
+        query: str,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search iTunes for tracks matching a combined artist+title query.
+
+        Used by candidate_match_worker as a fallback source.
+        Returns track dicts with keys: trackId, trackName, artistName,
+        artistId, trackTimeMillis, trackExplicitness.
+        """
+        await self._limiter.acquire()
+
+        async def _fetch() -> List[Dict[str, Any]]:
+            resp = await self._http.get(
+                ITUNES_SEARCH_URL,
+                params={
+                    "term": query,
+                    "entity": "song",
+                    "media": "music",
+                    "limit": min(limit, 25),
+                },
+            )
+            if resp.status_code in (403, 429):
+                return []
+            if not resp.is_success:
+                return []
+            return [
+                r for r in resp.json().get("results", [])
+                if r.get("wrapperType") == "track" and r.get("kind") == "song"
+            ]
+
+        try:
+            return await self._retry(_fetch)()
+        except Exception as exc:
+            logger.debug("itunes_track_search_failed", query=query, error=str(exc))
+            return []
+
     # ── Apple Music RSS Charts ────────────────────────────────────────────────
 
     async def get_rss_chart(

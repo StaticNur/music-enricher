@@ -47,7 +47,9 @@ from app.models.track import (
     AlbumRef,
     YoutubeData,
 )
+from app.services.apple_music import AppleMusicClient
 from app.services.deezer import DeezerClient
+from app.services.jiosaavn import JioSaavnClient
 from app.services.spotify import SpotifyClient, SpotifyError
 from app.utils.circuit_breaker import CircuitBreakerOpen
 from app.utils.deduplication import (
@@ -61,6 +63,23 @@ from app.workers.base import BaseWorker, WORKER_INSTANCE_ID, LOCK_TIMEOUT_SECOND
 logger = structlog.get_logger(__name__)
 
 _SEARCH_LIMIT = 5  # candidates to score per search query
+
+
+def _to_latin(text: str) -> str:
+    """
+    Transliterate text to Latin script for cross-script fuzzy matching.
+
+    Handles Cyrillic, Arabic, CJK, Japanese, Korean, Devanagari, Thai.
+    If already Latin or no transliteration is available, returns text unchanged.
+
+    Examples:
+        "Звонкий"  →  "Zvonkiy"  (Cyrillic → Latin, rapidfuzz can then match)
+        "Arijit"   →  "Arijit"   (already Latin, no-op)
+    """
+    from app.utils.transliteration import detect_script, transliterate_track_name
+    script = detect_script(text)
+    result = transliterate_track_name(text, script, None)
+    return result if result is not None else text
 
 
 def _str_similarity(s1: str, s2: str) -> float:
@@ -96,11 +115,15 @@ class CandidateMatchWorker(BaseWorker):
         super().__init__(db, settings)
         self._spotify: Optional[SpotifyClient] = None
         self._deezer: Optional[DeezerClient] = None
+        self._jiosaavn: Optional[JioSaavnClient] = None
+        self._itunes: Optional[AppleMusicClient] = None
 
     async def on_startup(self) -> None:
         if self.settings.spotify_enabled:
             self._spotify = SpotifyClient(self.settings)
         self._deezer = DeezerClient(self.settings)
+        self._jiosaavn = JioSaavnClient(self.settings)
+        self._itunes = AppleMusicClient(self.settings)
         logger.info(
             "candidate_match_worker_started",
             spotify_enabled=self.settings.spotify_enabled,
@@ -111,6 +134,10 @@ class CandidateMatchWorker(BaseWorker):
             await self._spotify.aclose()
         if self._deezer:
             await self._deezer.aclose()
+        if self._jiosaavn:
+            await self._jiosaavn.aclose()
+        if self._itunes:
+            await self._itunes.aclose()
 
     # ── Queue claiming ────────────────────────────────────────────────────────
 
@@ -209,6 +236,26 @@ class CandidateMatchWorker(BaseWorker):
                 if deezer_raw is not None:
                     track_doc = self._parse_deezer_track(deezer_raw)
                     match_source = "deezer"
+
+            # ── 3. Fallback to JioSaavn (Indian music coverage) ───────────────
+            if track_doc is None and self._jiosaavn is not None:
+                jiosaavn_raw = await self._find_jiosaavn_match(
+                    title, artist,
+                    candidate_duration_ms=duration_ms_c,
+                )
+                if jiosaavn_raw is not None:
+                    track_doc = self._parse_jiosaavn_track(jiosaavn_raw)
+                    match_source = "jiosaavn"
+
+            # ── 4. Fallback to iTunes (broad catalog, no auth) ────────────────
+            if track_doc is None and self._itunes is not None:
+                itunes_raw = await self._find_itunes_match(
+                    title, artist,
+                    candidate_duration_ms=duration_ms_c,
+                )
+                if itunes_raw is not None:
+                    track_doc = self._parse_itunes_track(itunes_raw)
+                    match_source = "itunes"
 
             matched_id: Optional[str] = None
             if track_doc is not None:
@@ -309,6 +356,12 @@ class CandidateMatchWorker(BaseWorker):
         best: Optional[Dict[str, Any]] = None
         best_score = 0.0
 
+        # Precompute Latin versions of candidate title/artist once (not per-item).
+        # Handles cross-script mismatches: "Звонкий" (Last.fm Cyrillic)
+        # vs "Zvonkiy" (Deezer Latin) — raw similarity ≈ 0, translit ≈ 0.9.
+        latin_norm_title = _to_latin(norm_title)
+        latin_norm_artist = _to_latin(norm_artist)
+
         for item in items:
             # ISRC exact match — highest possible confidence
             if get_isrc is not None and candidate_isrc:
@@ -316,8 +369,19 @@ class CandidateMatchWorker(BaseWorker):
                 if item_isrc and item_isrc.upper() == candidate_isrc.upper():
                     return item, 1.0
 
-            t_sim = _str_similarity(norm_title, normalize_text(get_title(item)))
-            a_sim = _str_similarity(norm_artist, normalize_text(get_artist(item)))
+            item_title = normalize_text(get_title(item))
+            item_artist = normalize_text(get_artist(item))
+
+            # Take the best similarity across raw and transliterated forms.
+            # If both strings are already Latin, _to_latin is a no-op → same score.
+            t_sim = max(
+                _str_similarity(norm_title, item_title),
+                _str_similarity(latin_norm_title, _to_latin(item_title)),
+            )
+            a_sim = max(
+                _str_similarity(norm_artist, item_artist),
+                _str_similarity(latin_norm_artist, _to_latin(item_artist)),
+            )
             score = 0.6 * t_sim + 0.4 * a_sim
 
             # Duration bonus/penalty — only when both sides have duration
@@ -463,6 +527,67 @@ class CandidateMatchWorker(BaseWorker):
             )
         return best
 
+    async def _find_jiosaavn_match(
+        self,
+        title: str,
+        artist: str,
+        *,
+        candidate_duration_ms: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Search JioSaavn for a matching track (good for Indian / South Asian music)."""
+        assert self._jiosaavn is not None
+        norm_title = normalize_text(title)
+        norm_artist = normalize_text(artist)
+        items = await self._jiosaavn.search_songs(
+            f"{norm_artist} {norm_title}", n=_SEARCH_LIMIT
+        )
+        if not items:
+            return None
+        # search_songs returns normalized {id, title, artist, duration_ms, language}
+        best, score = self._best_match(
+            norm_title, norm_artist, items,
+            get_title=lambda i: i.get("title") or "",
+            get_artist=lambda i: i.get("artist") or "",
+            candidate_duration_ms=candidate_duration_ms,
+            get_duration=lambda i: i.get("duration_ms"),
+        )
+        if best:
+            logger.debug(
+                "candidate_matched_jiosaavn",
+                title=title, artist=artist, confidence=round(score, 3),
+            )
+        return best
+
+    async def _find_itunes_match(
+        self,
+        title: str,
+        artist: str,
+        *,
+        candidate_duration_ms: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Search iTunes Search API for a matching track (broad catalog, no auth)."""
+        assert self._itunes is not None
+        norm_title = normalize_text(title)
+        norm_artist = normalize_text(artist)
+        items = await self._itunes.search_tracks(
+            f"{norm_artist} {norm_title}", limit=_SEARCH_LIMIT
+        )
+        if not items:
+            return None
+        best, score = self._best_match(
+            norm_title, norm_artist, items,
+            get_title=lambda i: i.get("trackName") or "",
+            get_artist=lambda i: i.get("artistName") or "",
+            candidate_duration_ms=candidate_duration_ms,
+            get_duration=lambda i: i.get("trackTimeMillis"),
+        )
+        if best:
+            logger.debug(
+                "candidate_matched_itunes",
+                title=title, artist=artist, confidence=round(score, 3),
+            )
+        return best
+
     # ── Track parsing (mirrors playlist_worker / genre_worker pattern) ────────
 
     def _parse_spotify_track(self, raw: Dict[str, Any]) -> Optional[TrackDocument]:
@@ -562,6 +687,74 @@ class CandidateMatchWorker(BaseWorker):
             popularity=(raw.get("rank") or 0) // 10000,
             duration_ms=duration_ms,
             explicit=raw.get("explicit_lyrics") or False,
+            markets_count=0,
+            markets=[],
+            status=TrackStatus.BASE_COLLECTED,
+            appearance_score=1,
+        )
+
+    def _parse_jiosaavn_track(self, raw: Dict[str, Any]) -> Optional[TrackDocument]:
+        """
+        Parse a normalized JioSaavn song dict (from search_songs) into a TrackDocument.
+
+        Input ``raw`` is already normalized: {id, title, artist, duration_ms, language}.
+        Uses ``jiosaavn:{id}`` placeholder — backfilled by other workers later.
+        """
+        song_id = raw.get("id", "")
+        title = raw.get("title", "")
+        artist = raw.get("artist", "")
+        if not song_id or not title or not artist:
+            return None
+
+        duration_ms = raw.get("duration_ms", 0)
+        fp = compute_candidate_fingerprint(title, artist, duration_ms)
+
+        return TrackDocument(
+            spotify_id=f"jiosaavn:{song_id}",
+            isrc=None,
+            fingerprint=fp,
+            name=title,
+            artists=[ArtistRef(spotify_id=f"jiosaavn_artist:{song_id}", name=artist)],
+            album=None,
+            popularity=0,
+            duration_ms=duration_ms,
+            explicit=False,
+            markets_count=0,
+            markets=[],
+            status=TrackStatus.BASE_COLLECTED,
+            appearance_score=1,
+        )
+
+    def _parse_itunes_track(self, raw: Dict[str, Any]) -> Optional[TrackDocument]:
+        """
+        Parse a raw iTunes Search API result into a TrackDocument.
+
+        Uses ``itunes:{trackId}`` placeholder — backfilled by other workers later.
+        No ISRC available from iTunes Search API.
+        """
+        track_id = raw.get("trackId")
+        title = (raw.get("trackName") or "").strip()
+        artist_name = (raw.get("artistName") or "").strip()
+        if not track_id or not title or not artist_name:
+            return None
+
+        artist_ref = ArtistRef(
+            spotify_id=f"itunes_artist:{raw.get('artistId', track_id)}",
+            name=artist_name,
+        )
+        duration_ms = raw.get("trackTimeMillis") or 0
+        fp = compute_candidate_fingerprint(title, artist_name, duration_ms)
+
+        return TrackDocument(
+            spotify_id=f"itunes:{track_id}",
+            isrc=None,
+            fingerprint=fp,
+            name=title,
+            artists=[artist_ref],
+            album=None,
+            popularity=0,
+            duration_ms=duration_ms,
+            explicit=raw.get("trackExplicitness") == "explicit",
             markets_count=0,
             markets=[],
             status=TrackStatus.BASE_COLLECTED,

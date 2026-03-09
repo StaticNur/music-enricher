@@ -32,27 +32,40 @@ services:
     deploy:
       replicas: 0
 
+  # artist-graph-worker работает без Spotify через Deezer BFS — оставить 1 реплику.
+  # Всё ещё находит новые треки через album_processed_cache BFS.
   artist-graph-worker:
     deploy:
-      replicas: 0
+      replicas: 1
 
   regional-seed-worker:
     deploy:
       replicas: 0
 
-  # ── Candidate match → Deezer-only режим ───────────────────────────────────
-  # Deezer search заменяет Spotify search. Threshold 0.75 (вместо 0.8) чтобы
-  # компенсировать менее точный Deezer fuzzy match vs. Spotify structured.
+  # ── Candidate match → multi-source режим ──────────────────────────────────
+  # Источники по приоритету: Deezer → JioSaavn → iTunes.
+  # Threshold 0.75: компенсирует менее точный поиск без Spotify structured query.
+  # Транслитерация в _best_match решает проблему кириллица/латиница.
+  # 6 реплик: bottleneck (570K+ backlog кандидатов).
+  #
+  # Deezer IP-бюджет (10 rps суммарно на IP):
+  #   candidate-match-worker: 6 × 0.5 = 3 rps
+  #   deezer-direct-worker:   3 × 2   = 6 rps
+  #   ИТОГО: 9 rps ✅
   candidate-match-worker:
     environment:
       WORKER_TYPE: candidate_match_worker
       SPOTIFY_ENABLED: "false"
       CANDIDATE_MATCH_CONFIDENCE: "0.75"
+      DEEZER_RATE_LIMIT_RPS: "0.5"
+      JIOSAAVN_RATE_LIMIT_RPS: "0.5"
     deploy:
-      replicas: 2
+      replicas: 6
 
-  # ── Deezer BFS → масштабировать до 5 реплик ───────────────────────────────
-  # IP limit Deezer = 10 rps. 5 реплик × 2 rps = 10 rps (точно в лимите).
+  # ── Deezer BFS → 3 реплики × 2 rps = 6 rps ───────────────────────────────
+  # IP limit Deezer = 10 rps суммарно. candidate-match-worker берёт 3 rps →
+  # здесь остаётся 6 rps (3 реплики × 2 rps).
+  # BFS достиг насыщения (~20K артистов обработано), высокий % дублей.
   deezer-direct-worker:
     environment:
       WORKER_TYPE: deezer_direct_worker
@@ -60,23 +73,23 @@ services:
       DEEZER_TOP_TRACKS_LIMIT: "100"
       DEEZER_MAX_ALBUMS_PER_ARTIST: "50"
     deploy:
-      replicas: 5
+      replicas: 3
 
-  # ── iTunes → масштабировать до 5 реплик ───────────────────────────────────
-  # iTunes rate limit per-instance, не per-IP. 5 реплик безопасно.
+  # ── iTunes → 3 реплики ────────────────────────────────────────────────────
+  # iTunes rate limit per-instance, не per-IP. 3 реплики × 6 rps = 18 rps суммарно.
   itunes-worker:
     environment:
       WORKER_TYPE: itunes_worker
       ITUNES_RATE_LIMIT_RPS: "6"
       ITUNES_BATCH_SIZE: "20"
     deploy:
-      replicas: 4
+      replicas: 3
 
-  # ── Last.fm → 2 реплики ───────────────────────────────────────────────────
-  # 4 rps per-instance. 2 реплики = 8 rps — в рамках лимита Last.fm.
+  # ── Last.fm → 0 реплик ────────────────────────────────────────────────────
+  # Очередь lastfm_seed_queue исчерпана (0 pending). Воркеры простаивают.
   lastfm-worker:
     deploy:
-      replicas: 2
+      replicas: 0
 
   # ── YouTube Music → 2 реплики ─────────────────────────────────────────────
   ytmusic-worker:
