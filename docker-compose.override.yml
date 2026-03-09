@@ -32,9 +32,15 @@ services:
     deploy:
       replicas: 0
 
-  # artist-graph-worker работает без Spotify через Deezer BFS — оставить 1 реплику.
-  # Всё ещё находит новые треки через album_processed_cache BFS.
+  # artist-graph-worker: Spotify отключён → Deezer fallback.
+  # Резолвит артистов по имени через Deezer search, собирает треки, BFS через related artists.
+  # Треки дедублируются через ISRC/fingerprint — дублей с deezer-direct-worker нет.
+  # Deezer IP budget: candidate-match 3 rps + deezer-direct 6 rps + artist-graph 1 rps = 10 rps ✅
   artist-graph-worker:
+    environment:
+      WORKER_TYPE: artist_graph_worker
+      SPOTIFY_ENABLED: "false"
+      DEEZER_RATE_LIMIT_RPS: "1"
     deploy:
       replicas: 1
 

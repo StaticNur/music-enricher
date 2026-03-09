@@ -54,9 +54,16 @@ from app.models.track import (
     AlbumRef,
 )
 from app.services.spotify import SpotifyClient
+from app.services.deezer import DeezerClient
 from app.utils.circuit_breaker import CircuitBreakerOpen
 from app.utils.deduplication import compute_fingerprint, extract_isrc
 from app.workers.base import BaseWorker, WORKER_INSTANCE_ID, LOCK_TIMEOUT_SECONDS
+from app.workers.deezer_direct_worker import _deezer_fingerprint
+
+try:
+    from rapidfuzz import fuzz as _fuzz
+except ImportError:
+    _fuzz = None  # type: ignore[assignment]
 
 logger = structlog.get_logger(__name__)
 
@@ -73,16 +80,25 @@ class ArtistGraphWorker(BaseWorker):
     def __init__(self, db: AsyncIOMotorDatabase, settings: Settings) -> None:  # type: ignore[type-arg]
         super().__init__(db, settings)
         self._spotify: Optional[SpotifyClient] = None
+        self._deezer: Optional[DeezerClient] = None
 
     async def on_startup(self) -> None:
+        if not self.settings.spotify_enabled:
+            self._deezer = DeezerClient(self.settings)
+            await self._bootstrap_queue()
+            await self._seed_regional_artists()
+            logger.info("artist_graph_worker_started", mode="deezer")
+            return
         self._spotify = SpotifyClient(self.settings)
         await self._bootstrap_queue()
         await self._seed_regional_artists()
-        logger.info("artist_graph_worker_started")
+        logger.info("artist_graph_worker_started", mode="spotify")
 
     async def on_shutdown(self) -> None:
         if self._spotify:
             await self._spotify.aclose()
+        if self._deezer:
+            await self._deezer.aclose()
 
     # ── Seeding ───────────────────────────────────────────────────────────────
 
@@ -326,6 +342,10 @@ class ArtistGraphWorker(BaseWorker):
             await self._process_artist(item)
 
     async def _process_artist(self, item: Dict[str, Any]) -> None:
+        if not self.settings.spotify_enabled:
+            await self._process_artist_deezer(item)
+            return
+
         artist_id: str = item["artist_id"]
         depth: int = item.get("depth", 0)
         col = self.db[ARTIST_GRAPH_QUEUE_COL]
@@ -789,6 +809,307 @@ class ArtistGraphWorker(BaseWorker):
             {"artist_id": artist_id},
             {"$set": {"processed": True, "locked_at": None, "locked_by": None, "updated_at": now}},
         )
+
+    # ── Deezer fallback path (SPOTIFY_ENABLED=false) ─────────────────────────
+
+    async def _process_artist_deezer(self, item: Dict[str, Any]) -> None:
+        """
+        Process one artist_graph_queue item via Deezer API.
+
+        Used when SPOTIFY_ENABLED=false. Resolves the Spotify artist name to a
+        Deezer artist (fuzzy name match), harvests top tracks + albums, upserts
+        them using the same ISRC/fingerprint dedup as deezer_direct_worker, and
+        enqueues Deezer related artists back into artist_graph_queue.
+        """
+        assert self._deezer is not None
+        artist_id: str = item["artist_id"]
+        artist_name: str = item.get("name") or ""
+        depth: int = item.get("depth", 0)
+        col = self.db[ARTIST_GRAPH_QUEUE_COL]
+        cache_col = self.db[ARTIST_PROCESSED_CACHE_COL]
+        now = datetime.now(timezone.utc)
+
+        try:
+            # Skip if already processed by another replica
+            if await cache_col.find_one({"artist_id": artist_id}, {"_id": 1}):
+                await self._mark_processed(col, artist_id, now)
+                return
+
+            # Resolve Deezer artist ID
+            if artist_id.startswith("deezer:"):
+                deezer_id = int(artist_id.split(":", 1)[1])
+            else:
+                if not artist_name:
+                    await self._mark_processed(col, artist_id, now)
+                    return
+                deezer_artist = await self._find_deezer_artist(artist_name)
+                if not deezer_artist:
+                    logger.debug(
+                        "artist_graph_deezer_not_found",
+                        artist_id=artist_id,
+                        name=artist_name,
+                    )
+                    await self._mark_processed(col, artist_id, now)
+                    return
+                deezer_id = deezer_artist["id"]
+
+            inserted = 0
+
+            # Top tracks (1 API call)
+            top_tracks = await self._deezer.get_artist_top_tracks(deezer_id, limit=100)
+            for t in top_tracks:
+                if await self._upsert_deezer_track(t, album_data=t.get("album")):
+                    inserted += 1
+
+            # Albums (optional, same flag as deezer_direct_worker)
+            if self.settings.deezer_crawl_albums:
+                inserted += await self._crawl_deezer_albums(deezer_id)
+
+            # BFS: related artists → artist_graph_queue
+            new_enqueued = 0
+            if depth < self.settings.artist_graph_max_depth:
+                new_enqueued = await self._enqueue_related_deezer(deezer_id, depth)
+
+            # Mark done in processed cache
+            await cache_col.update_one(
+                {"artist_id": artist_id},
+                {"$setOnInsert": {"artist_id": artist_id, "processed_at": now}},
+                upsert=True,
+            )
+            await self._mark_processed(col, artist_id, now)
+
+            await self.increment_stat("artists_processed", 1)
+            await self.increment_stat("tracks_discovered", inserted)
+
+            logger.info(
+                "artist_graph_deezer_artist_done",
+                artist_id=artist_id,
+                deezer_id=deezer_id,
+                artist_name=artist_name,
+                depth=depth,
+                tracks_inserted=inserted,
+                new_artists_enqueued=new_enqueued,
+            )
+
+        except Exception as exc:
+            logger.error(
+                "artist_graph_deezer_artist_failed",
+                artist_id=artist_id,
+                artist_name=artist_name,
+                error=str(exc),
+                exc_info=True,
+            )
+            retry_count = item.get("retry_count", 0) + 1
+            processed = retry_count >= self.settings.worker_retry_limit
+            await col.update_one(
+                {"artist_id": artist_id},
+                {
+                    "$set": {
+                        "processed": processed,
+                        "retry_count": retry_count,
+                        "locked_at": None,
+                        "locked_by": None,
+                        "updated_at": now,
+                    }
+                },
+            )
+
+    async def _find_deezer_artist(self, name: str) -> Optional[Dict[str, Any]]:
+        """Search Deezer by artist name, return best fuzzy match or None."""
+        results = await self._deezer.search_artists(name, limit=5)
+        if not results:
+            return None
+        norm = name.lower().strip()
+        best: Optional[Dict[str, Any]] = None
+        best_score = 0.0
+        for r in results:
+            r_name = (r.get("name") or "").lower().strip()
+            if _fuzz is not None:
+                score = float(_fuzz.ratio(norm, r_name))
+            else:
+                score = 100.0 if norm == r_name else 0.0
+            if score > best_score:
+                best_score = score
+                best = r
+        return best if best_score >= 60.0 else None
+
+    async def _crawl_deezer_albums(self, deezer_id: int) -> int:
+        """Fetch artist albums via Deezer and upsert their tracks. Returns inserted count."""
+        assert self._deezer is not None
+        inserted = 0
+        index = 0
+        limit = 25
+        max_albums = self.settings.deezer_max_albums_per_artist
+
+        while True:
+            page = await self._deezer.get_artist_albums(deezer_id, limit=limit, index=index)
+            albums = page.get("data", [])
+            if not albums:
+                break
+            for album in albums:
+                album_id = album.get("id")
+                if not album_id:
+                    continue
+                tracks = await self._deezer.get_album_tracks(album_id)
+                for t in tracks:
+                    if await self._upsert_deezer_track(t, album_data=album):
+                        inserted += 1
+
+            total = page.get("total", 0)
+            index += limit
+            if index >= total or index >= max_albums * limit:
+                break
+
+        return inserted
+
+    async def _enqueue_related_deezer(self, deezer_id: int, current_depth: int) -> int:
+        """
+        Fetch Deezer related artists and enqueue new ones into artist_graph_queue.
+
+        Uses artist_id = "deezer:{id}" so the next processing cycle resolves them
+        via the Deezer path (no Spotify lookup needed).
+        """
+        assert self._deezer is not None
+        related = await self._deezer.get_artist_related(deezer_id)
+        if not related:
+            return 0
+
+        col = self.db[ARTIST_GRAPH_QUEUE_COL]
+        cache_col = self.db[ARTIST_PROCESSED_CACHE_COL]
+        now = datetime.now(timezone.utc)
+        enqueued = 0
+
+        for rel in related:
+            rel_deezer_id = rel.get("id")
+            rel_name = rel.get("name") or ""
+            if not rel_deezer_id:
+                continue
+
+            graph_id = f"deezer:{rel_deezer_id}"
+
+            # Skip already-processed artists
+            if await cache_col.find_one({"artist_id": graph_id}, {"_id": 1}):
+                continue
+
+            item = ArtistGraphItem(
+                artist_id=graph_id,
+                name=rel_name,
+                source=GraphSource.SPOTIFY,  # reused enum value; source label only
+                depth=current_depth + 1,
+                priority=0.1,
+            )
+            doc = item.to_mongo()
+            doc["created_at"] = now
+            doc["updated_at"] = now
+
+            try:
+                result = await col.update_one(
+                    {"artist_id": graph_id},
+                    {"$setOnInsert": doc},
+                    upsert=True,
+                )
+                if result.upserted_id is not None:
+                    enqueued += 1
+            except Exception:
+                pass
+
+        return enqueued
+
+    async def _upsert_deezer_track(
+        self,
+        raw: Dict[str, Any],
+        album_data: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        Upsert a Deezer track into the main tracks collection.
+
+        Identical dedup logic to deezer_direct_worker:
+          1. ISRC match → existing doc, bump appearance_score only.
+          2. Fingerprint match (title + artist_name hash) → same.
+          3. Neither → new insert with spotify_id = "deezer:{track_id}".
+        """
+        from app.models.track import AlbumRef  # already imported at top level, but explicit here
+
+        track_id = raw.get("id")
+        title = (raw.get("title") or raw.get("title_short") or "").strip()
+        if not track_id or not title:
+            return False
+
+        artist_raw = raw.get("artist") or {}
+        artist_name = (artist_raw.get("name") or "").strip()
+        if not artist_name:
+            return False
+
+        duration_s: int = raw.get("duration") or 0
+        duration_ms: int = duration_s * 1000
+        isrc: Optional[str] = raw.get("isrc") or None
+        explicit: bool = raw.get("explicit_lyrics") or False
+        deezer_artist_id = artist_raw.get("id", 0)
+
+        album_ref: Optional[AlbumRef] = None
+        if album_data and album_data.get("id"):
+            album_ref = AlbumRef(
+                spotify_id=f"deezer_album:{album_data['id']}",
+                name=album_data.get("title") or album_data.get("name") or "",
+                release_date=album_data.get("release_date"),
+                images=[{"url": album_data["cover"]}] if album_data.get("cover") else [],
+            )
+
+        fp = _deezer_fingerprint(title, artist_name, duration_s)
+        placeholder_spotify_id = f"deezer:{track_id}"
+
+        col = self.db[TRACKS_COL]
+        now = datetime.now(timezone.utc)
+
+        insert_doc: Dict[str, Any] = {
+            "spotify_id": placeholder_spotify_id,
+            "isrc": isrc,
+            "fingerprint": fp,
+            "name": title,
+            "artists": [{"spotify_id": f"deezer:{deezer_artist_id}", "name": artist_name}],
+            "album": album_ref.model_dump() if album_ref else None,
+            "popularity": raw.get("rank", 0) // 10000,
+            "duration_ms": duration_ms,
+            "explicit": explicit,
+            "markets_count": 0,
+            "markets": [],
+            "status": TrackStatus.BASE_COLLECTED.value,
+            "version_album_ids": [],
+            "youtube_searched": False,
+            "musicbrainz_enriched": False,
+            "language_detected": False,
+            "transliteration_done": False,
+            "mb_priority": 0,
+            "quality_score": 0.0,
+            "regional_score": 0.0,
+            "artist_followers": 0,
+            "retry_count": 0,
+            "error_log": [],
+            "locked_at": None,
+            "locked_by": None,
+        }
+
+        filter_q: Dict[str, Any] = {"isrc": isrc} if isrc else {"fingerprint": fp}
+
+        update_ops: Dict[str, Any] = {
+            "$setOnInsert": {**insert_doc, "created_at": now},
+            "$inc": {"appearance_score": 1},
+            "$set": {"updated_at": now},
+        }
+
+        try:
+            result = await col.update_one(filter_q, update_ops, upsert=True)
+            return result.upserted_id is not None
+        except Exception as exc:
+            if "duplicate key" in str(exc).lower():
+                return False
+            logger.error(
+                "artist_graph_deezer_track_upsert_error",
+                track_id=track_id,
+                title=title,
+                error=str(exc),
+            )
+            return False
 
     async def _cache_album(self, album_id: str, now: datetime) -> None:
         album_cache_col = self.db[ALBUM_PROCESSED_CACHE_COL]
