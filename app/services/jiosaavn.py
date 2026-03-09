@@ -179,11 +179,20 @@ class JioSaavnClient:
             logger.error("jiosaavn_get_playlist_failed", list_id=list_id, error=str(exc))
             return []
 
+        inner = data.get("data") or {}
+        if isinstance(inner, str):
+            import json as _json
+            try:
+                inner = _json.loads(inner)
+            except Exception:
+                inner = {}
+
         songs = (
             data.get("songs")
             or data.get("list")
-            or data.get("data", {}).get("songs")
-            or data.get("data", {}).get("list")
+            or inner.get("songs")
+            or inner.get("list")
+            or inner.get("tracks")
             or []
         )
         # Newer JioSaavn API may return list as a JSON-encoded string
@@ -194,7 +203,16 @@ class JioSaavnClient:
             except Exception:
                 songs = []
         if not isinstance(songs, list):
-            return []
+            songs = []
+
+        if not songs:
+            logger.warning(
+                "jiosaavn_playlist_parse_failed",
+                list_id=list_id,
+                top_keys=list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                inner_keys=list(inner.keys()) if isinstance(inner, dict) else None,
+                sample=str(data)[:300],
+            )
 
         return [t for t in (self._parse_song(s) for s in songs) if t]
 
@@ -227,11 +245,20 @@ class JioSaavnClient:
 
         # Search response: {"results": [...], "total": N}
         # Newer API may wrap in {"data": {"results": [...]}} or use "songs" key
+        inner = data.get("data") or {}
+        if isinstance(inner, str):
+            import json as _json
+            try:
+                inner = _json.loads(inner)
+            except Exception:
+                inner = {}
+
         results = (
             data.get("results")
             or data.get("songs")
-            or data.get("data", {}).get("results")
-            or data.get("data", {}).get("songs")
+            or inner.get("results")
+            or inner.get("songs")
+            or inner.get("tracks")
             or []
         )
         if isinstance(results, str):
@@ -241,7 +268,17 @@ class JioSaavnClient:
             except Exception:
                 results = []
         if not isinstance(results, list):
-            return []
+            results = []
+
+        if not results:
+            logger.warning(
+                "jiosaavn_search_parse_failed",
+                query=query,
+                page=page,
+                top_keys=list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                inner_keys=list(inner.keys()) if isinstance(inner, dict) else None,
+                sample=str(data)[:300],
+            )
 
         return [t for t in (self._parse_song(s) for s in results) if t]
 

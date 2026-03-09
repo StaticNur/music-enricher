@@ -92,7 +92,7 @@ services:
     environment:
       WORKER_TYPE: quality_worker
     deploy:
-      replicas: 3
+      replicas: 1
 
   # ── Exporter (runs on-demand or periodically) ─────
   exporter:

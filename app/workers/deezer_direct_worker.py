@@ -296,6 +296,10 @@ class DeezerDirectWorker(BaseWorker):
                 break
             batch.append(doc)
 
+        if not batch:
+            # Queue exhausted — reset for next BFS cycle without requiring restart
+            await self._bootstrap_queue()
+
         return batch
 
     # ── Processing ────────────────────────────────────────────────────────────

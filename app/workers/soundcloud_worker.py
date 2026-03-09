@@ -93,18 +93,24 @@ class SoundCloudWorker(BaseWorker):
     def __init__(self, db: AsyncIOMotorDatabase, settings: Settings) -> None:  # type: ignore[type-arg]
         super().__init__(db, settings)
         self._client: Optional[SoundCloudClient] = None
-        self._client_id_available: bool = False
-        self._discovery_attempts: int = 0
 
     async def on_startup(self) -> None:
         self._client = SoundCloudClient(self.settings)
-        # Try to ensure client_id is available
-        self._client_id_available = await self._try_ensure_client_id()
-        if not self._client_id_available:
+
+        # Discover client_id fresh from JS bundles (up to _MAX_DISCOVERY_ATTEMPTS tries)
+        available = False
+        for attempt in range(1, _MAX_DISCOVERY_ATTEMPTS + 1):
+            available = await self._client.ensure_client_id()
+            if available:
+                break
             logger.warning(
-                "soundcloud_worker_idle_no_client_id",
-                attempts=self._discovery_attempts,
+                "soundcloud_client_id_discovery_attempt_failed",
+                attempt=attempt,
+                max_attempts=_MAX_DISCOVERY_ATTEMPTS,
             )
+
+        if not available:
+            logger.warning("soundcloud_worker_idle_no_client_id")
             return
 
         await self._bootstrap_queue()
@@ -116,21 +122,6 @@ class SoundCloudWorker(BaseWorker):
     async def on_shutdown(self) -> None:
         if self._client:
             await self._client.aclose()
-
-    async def _try_ensure_client_id(self) -> bool:
-        """Attempt client_id discovery up to _MAX_DISCOVERY_ATTEMPTS times."""
-        assert self._client is not None
-        for attempt in range(1, _MAX_DISCOVERY_ATTEMPTS + 1):
-            self._discovery_attempts = attempt
-            success = await self._client.ensure_client_id()
-            if success:
-                return True
-            logger.warning(
-                "soundcloud_client_id_discovery_attempt_failed",
-                attempt=attempt,
-                max_attempts=_MAX_DISCOVERY_ATTEMPTS,
-            )
-        return False
 
     # ── Seeding ───────────────────────────────────────────────────────────────
 

@@ -483,15 +483,26 @@ class NeteaseWorker(BaseWorker):
                 },
                 upsert=True,
             )
-            return result.upserted_id is not None
+            if result.upserted_id is not None:
+                return True
+            # fingerprint matched an existing doc — sample log for diagnosis
+            existing = await col.find_one({"fingerprint": fp}, {"spotify_id": 1, "name": 1})
+            logger.info(
+                "netease_track_fp_collision",
+                song_id=song_id,
+                name=name,
+                fingerprint=fp[:16],
+                existing_spotify_id=existing.get("spotify_id") if existing else "NOT_FOUND",
+            )
+            return False
 
         except Exception as exc:
-            if "duplicate key" in str(exc).lower():
-                return False
             logger.error(
                 "netease_track_upsert_error",
                 song_id=song_id,
                 name=name,
+                fingerprint=fp[:16],
                 error=str(exc),
+                exc_info=True,
             )
             return False

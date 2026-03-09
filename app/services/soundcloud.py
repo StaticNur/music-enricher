@@ -66,7 +66,10 @@ class SoundCloudClient:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._client_id: str = settings.soundcloud_client_id or ""
+        # Always start with empty — auto-discovery runs on first ensure_client_id().
+        # SOUNDCLOUD_CLIENT_ID env var is kept as an override hint only if discovery fails.
+        self._client_id: str = ""
+        self._client_id_hint: str = settings.soundcloud_client_id or ""
         rate = settings.soundcloud_rate_limit_rps
         self._limiter = RateLimiter(rate=rate, capacity=rate)
         self._http = httpx.AsyncClient(
@@ -92,12 +95,13 @@ class SoundCloudClient:
 
     async def ensure_client_id(self) -> bool:
         """
-        Ensure we have a valid client_id.
+        Ensure we have a valid client_id via auto-discovery.
 
-        Returns True if client_id is available, False if discovery failed.
+        Always discovers fresh from SoundCloud JS bundles so the client_id
+        is never stale. Falls back to the SOUNDCLOUD_CLIENT_ID env hint only
+        if discovery fails (e.g. network unreachable).
+        Returns True if client_id is available, False if all sources failed.
         """
-        if self._client_id:
-            return True
         discovered = await self._discover_client_id()
         if discovered:
             self._client_id = discovered
@@ -106,6 +110,16 @@ class SoundCloudClient:
                 client_id=discovered[:8] + "...",
             )
             return True
+
+        # Discovery failed — fall back to env hint if available
+        if self._client_id_hint:
+            logger.warning(
+                "soundcloud_client_id_discovery_failed_using_hint",
+                hint=self._client_id_hint[:8] + "...",
+            )
+            self._client_id = self._client_id_hint
+            return True
+
         logger.error("soundcloud_client_id_not_found")
         return False
 
@@ -154,47 +168,72 @@ class SoundCloudClient:
     async def _get(
         self, path: str, params: Optional[Dict[str, Any]] = None
     ) -> Any:
-        """Rate-limited GET with retry on transport errors."""
-        await self._limiter.acquire()
+        """
+        Rate-limited GET with retry on transport errors.
 
-        merged_params: Dict[str, Any] = {"client_id": self._client_id}
-        if params:
-            merged_params.update(params)
+        On 401/403 (expired client_id): immediately re-discovers a fresh
+        client_id and retries the same request once — no restart needed.
+        """
+        for _id_attempt in range(2):  # allow one client_id refresh per call
+            # Ensure we have a client_id (re-discover if cleared)
+            if not self._client_id:
+                discovered = await self._discover_client_id()
+                if discovered:
+                    self._client_id = discovered
+                    logger.info(
+                        "soundcloud_client_id_refreshed",
+                        client_id=discovered[:8] + "...",
+                    )
+                else:
+                    raise SoundCloudError(0, "client_id unavailable")
 
-        @retry(
-            retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
-            stop=stop_after_attempt(3),
-            wait=wait_exponential_jitter(initial=2, max=30, jitter=2),
-            before_sleep=before_sleep_log(logger, logging.WARNING),
-            reraise=True,
-        )
-        async def _fetch() -> Any:
-            url = f"{_API_BASE}{path}"
-            resp = await self._http.get(url, params=merged_params)
+            await self._limiter.acquire()
 
-            if resp.status_code == 401:
-                # client_id expired — clear it so next call triggers re-discovery
-                logger.warning("soundcloud_client_id_expired_clearing")
-                self._client_id = ""
-                raise SoundCloudError(401, "client_id expired")
+            merged_params: Dict[str, Any] = {"client_id": self._client_id}
+            if params:
+                merged_params.update(params)
 
-            if resp.status_code == 429:
-                logger.warning("soundcloud_rate_limited", sleeping_for=30)
-                await asyncio.sleep(30)
-                raise httpx.TransportError("Rate limited")
+            @retry(
+                retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
+                stop=stop_after_attempt(3),
+                wait=wait_exponential_jitter(initial=2, max=30, jitter=2),
+                before_sleep=before_sleep_log(logger, logging.WARNING),
+                reraise=True,
+            )
+            async def _fetch() -> Any:
+                url = f"{_API_BASE}{path}"
+                resp = await self._http.get(url, params=merged_params)
 
-            if resp.status_code >= 500:
-                raise httpx.TransportError(f"SoundCloud server error {resp.status_code}")
+                if resp.status_code == 429:
+                    logger.warning("soundcloud_rate_limited", sleeping_for=30)
+                    await asyncio.sleep(30)
+                    raise httpx.TransportError("Rate limited")
 
-            if not resp.is_success:
-                raise SoundCloudError(resp.status_code, resp.text[:100])
+                if resp.status_code >= 500:
+                    raise httpx.TransportError(f"SoundCloud server error {resp.status_code}")
+
+                if not resp.is_success:
+                    raise SoundCloudError(resp.status_code, resp.text[:100])
+
+                try:
+                    return resp.json()
+                except Exception:
+                    raise SoundCloudError(0, "Invalid JSON response")
 
             try:
-                return resp.json()
-            except Exception:
-                raise SoundCloudError(0, "Invalid JSON response")
+                return await _fetch()
+            except SoundCloudError as exc:
+                if exc.status in (401, 403) and _id_attempt == 0:
+                    # client_id expired — clear and retry with a fresh one
+                    logger.warning(
+                        "soundcloud_client_id_expired_refreshing",
+                        status=exc.status,
+                    )
+                    self._client_id = ""
+                    continue
+                raise
 
-        return await _fetch()
+        raise SoundCloudError(0, "client_id refresh failed")
 
     # ── Charts ────────────────────────────────────────────────────────────────
 
