@@ -93,6 +93,7 @@ class SoundCloudWorker(BaseWorker):
     def __init__(self, db: AsyncIOMotorDatabase, settings: Settings) -> None:  # type: ignore[type-arg]
         super().__init__(db, settings)
         self._client: Optional[SoundCloudClient] = None
+        self._client_id_available: bool = False
 
     async def on_startup(self) -> None:
         self._client = SoundCloudClient(self.settings)
@@ -113,6 +114,7 @@ class SoundCloudWorker(BaseWorker):
             logger.warning("soundcloud_worker_idle_no_client_id")
             return
 
+        self._client_id_available = True
         await self._bootstrap_queue()
         logger.info(
             "soundcloud_worker_started",
@@ -403,7 +405,6 @@ class SoundCloudWorker(BaseWorker):
 
         insert_doc: Dict[str, Any] = {
             "spotify_id": placeholder_id,
-            "isrc": None,
             "fingerprint": fp,
             "name": title,
             "artists": [{"spotify_id": artist_ref.spotify_id, "name": artist_ref.name}],

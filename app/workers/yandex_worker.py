@@ -360,7 +360,6 @@ class YandexWorker(BaseWorker):
 
         insert_doc: Dict[str, Any] = {
             "spotify_id": placeholder_spotify_id,
-            "isrc": None,
             "fingerprint": fp,
             "name": title,
             "artists": artists_list,

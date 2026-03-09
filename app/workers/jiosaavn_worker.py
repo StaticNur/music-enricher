@@ -367,7 +367,6 @@ class JioSaavnWorker(BaseWorker):
 
         insert_doc: Dict[str, Any] = {
             "spotify_id": placeholder_id,
-            "isrc": None,
             "fingerprint": fp,
             "name": title,
             "artists": [{"spotify_id": artist_ref.spotify_id, "name": artist_ref.name}],

@@ -366,7 +366,6 @@ class ShazamWorker(BaseWorker):
 
         insert_doc: Dict[str, Any] = {
             "spotify_id": placeholder_id,
-            "isrc": isrc,
             "fingerprint": fp,
             "name": title,
             "artists": [{"spotify_id": artist_ref.spotify_id, "name": artist_ref.name}],
@@ -391,6 +390,8 @@ class ShazamWorker(BaseWorker):
             "locked_at": None,
             "locked_by": None,
         }
+        if isrc:
+            insert_doc["isrc"] = isrc
 
         # ISRC preferred; fall back to fingerprint
         filter_q: Dict[str, Any] = {"isrc": isrc} if isrc else {"fingerprint": fp}

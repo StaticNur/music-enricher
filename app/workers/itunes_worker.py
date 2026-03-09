@@ -409,7 +409,6 @@ def _base_track_doc(
 ) -> Dict[str, Any]:
     return {
         "spotify_id": spotify_id,
-        "isrc": None,
         "fingerprint": fingerprint,
         "name": name,
         "artists": [{"spotify_id": artist_spotify_id, "name": artist_name}],
