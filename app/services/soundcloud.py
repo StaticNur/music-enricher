@@ -252,7 +252,7 @@ class SoundCloudClient:
             data = await self._get(
                 "/charts",
                 params={
-                    "kind": kind,
+                    "kind": "trending",
                     "genre": f"soundcloud:genres:{genre}",
                     "region": "global",
                     "limit": min(limit, 200),
