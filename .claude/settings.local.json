@@ -12,7 +12,12 @@
       "Read(//mnt/c/Users/ZenBook/AppData/Local/Temp/**)",
       "Read(//mnt/c/Users/ZenBook/AppData/Local/Temp/claude/M--business-quickly-download-bot-music-enricher/tasks/**)",
       "WebSearch",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "WebFetch(domain:www.shazam.com)",
+      "WebFetch(domain:api-v2.soundcloud.com)",
+      "WebFetch(domain:cdn.shazam.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

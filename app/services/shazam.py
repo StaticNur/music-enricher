@@ -36,8 +36,8 @@ from app.utils.rate_limiter import RateLimiter
 
 logger = structlog.get_logger(__name__)
 
-_BASE_URL = "https://www.shazam.com"
-_CHART_PATH = "/shazam/v2/charts/track"
+_BASE_URL = "https://amp.shazam.com"
+_CHART_PATH_TMPL = "/discovery/v5/en-US/{country}/web/-/tracks"
 
 class ShazamClient:
     """
@@ -77,7 +77,7 @@ class ShazamClient:
           title, artist, isrc, shazam_key, apple_track_id
         Returns empty list on 404 (country not supported) or any error.
         """
-        url = _BASE_URL + _CHART_PATH
+        url = _BASE_URL + _CHART_PATH_TMPL.format(country=country_code.upper())
         try:
             return await self._fetch_chart(url, country_code)
         except Exception as exc:
@@ -100,14 +100,7 @@ class ShazamClient:
     ) -> List[Dict[str, Any]]:
         await self._limiter.acquire()
 
-        resp = await self._http.get(
-            url,
-            params={
-                "locale": "en-US",
-                "countryCode": country_code.upper(),
-                "limit": 200,
-            },
-        )
+        resp = await self._http.get(url, params={"limit": 200, "offset": 0},)
 
         if resp.status_code == 404:
             logger.debug("shazam_country_not_supported", country=country_code)

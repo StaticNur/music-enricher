@@ -254,9 +254,11 @@ class SoundCloudClient:
                 params={
                     "kind": kind,
                     "genre": f"soundcloud:genres:{genre}",
+                    "region": "global",
                     "limit": min(limit, 200),
+                    "offset": 0,
                     "linked_partitioning": "1",
-                },
+                }
             )
             collection = data.get("collection") or []
             tracks = []

@@ -97,10 +97,18 @@ services:
     deploy:
       replicas: 0
 
-  # ── YouTube Music → 2 реплики ─────────────────────────────────────────────
+  # ── YouTube Music → 0 реплик ──────────────────────────────────────────────
+  # Google блокирует unauthenticated ytmusicapi запросы (пустое тело → JSONDecodeError).
+  # 100% запросов падают. Включить когда Google разблокирует или добавят cookies.
   ytmusic-worker:
     deploy:
-      replicas: 2
+      replicas: 1
+
+  # ── YouTube enrichment → 0 реплик ─────────────────────────────────────────
+  # Та же проблема: ytmusicapi заблокирован Google.
+  youtube-enrichment-worker:
+    deploy:
+      replicas: 1
 
   # ── Audio features → статус-адвансер, оставить 8 ─────────────────────────
   # После первого 403 от Spotify не делает API calls, только MongoDB updates.
