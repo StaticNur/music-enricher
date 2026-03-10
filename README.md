@@ -422,14 +422,14 @@ Workers catch SIGTERM, finish the current batch, then exit. Resume anytime with 
 ### External sources (v3)
 
 | Variable | Default | Description |
-|---|---|---|
-| `LASTFM_API_KEY` | — | Free at last.fm |
-| `LASTFM_RATE_LIMIT_RPS` | `4.0` | Last.fm requests/second |
-| `LASTFM_MAX_PAGES` | `200` | Max pages per seed item |
-| `DISCOGS_TOKEN` | — | Personal access token (60 rps auth vs 25 anon) |
-| `DISCOGS_RATE_LIMIT_RPS` | `1.0` | **Do not increase** — IP throttle risk |
-| `DISCOGS_MAX_PAGES` | `100` | Max pages per seed item |
-| `CANDIDATE_MATCH_CONFIDENCE` | `0.8` | Min score to accept Spotify match |
+|---|---------|---|
+| `LASTFM_API_KEY` | —       | Free at last.fm |
+| `LASTFM_RATE_LIMIT_RPS` | `4.0`   | Last.fm requests/second |
+| `LASTFM_MAX_PAGES` | `200`   | Max pages per seed item |
+| `DISCOGS_TOKEN` | —       | Personal access token (60 rps auth vs 25 anon) |
+| `DISCOGS_RATE_LIMIT_RPS` | `1.0`   | **Do not increase** — IP throttle risk |
+| `DISCOGS_MAX_PAGES` | `100`   | Max pages per seed item |
+| `CANDIDATE_MATCH_CONFIDENCE` | `0.7`   | Min score to accept Spotify match |
 
 ### Artist graph (v4)
 

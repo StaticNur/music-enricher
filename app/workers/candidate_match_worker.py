@@ -10,7 +10,7 @@ Match scoring (weighted average):
     60% title similarity  (rapidfuzz token_sort_ratio)
     40% artist similarity (rapidfuzz token_sort_ratio)
 
-Only candidates with ``confidence >= CANDIDATE_MATCH_CONFIDENCE`` (default 0.8)
+Only candidates with ``confidence >= CANDIDATE_MATCH_CONFIDENCE`` (default 0.7)
 are inserted. Others are marked processed without a track insert.
 
 Source priority:

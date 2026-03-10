@@ -113,7 +113,7 @@ class Settings(BaseSettings):
     lastfm_api_key: str = Field(default="")
     lastfm_rate_limit_rps: float = Field(default=4.0)
     lastfm_max_retries: int = Field(default=3)
-    lastfm_max_pages: int = Field(default=200)   # max pages per tag (50 tracks/page)
+    lastfm_max_pages: int = Field(default=20)   # max pages per tag (50 tracks/page)
 
     # ── YouTube Music (v3) ────────────────────────────────────────────────────
     ytmusic_rate_limit_rps: float = Field(default=10.0)
@@ -127,7 +127,7 @@ class Settings(BaseSettings):
     discogs_max_pages: int = Field(default=100)  # max pages per style
 
     # ── Candidate matching (v3) ───────────────────────────────────────────────
-    candidate_match_confidence: float = Field(default=0.8)  # min Spotify match score
+    candidate_match_confidence: float = Field(default=0.7)  # min Spotify match score
 
     # ── Artist graph expansion (v4) ───────────────────────────────────────────
     # Maximum BFS depth from seed artists (0 = seed only)

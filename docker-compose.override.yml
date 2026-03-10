@@ -42,7 +42,7 @@ services:
       SPOTIFY_ENABLED: "false"
       DEEZER_RATE_LIMIT_RPS: "1"
     deploy:
-      replicas: 1
+      replicas: 3
 
   regional-seed-worker:
     deploy:
@@ -50,23 +50,23 @@ services:
 
   # ── Candidate match → multi-source режим ──────────────────────────────────
   # Источники по приоритету: Deezer → JioSaavn → iTunes.
-  # Threshold 0.75: компенсирует менее точный поиск без Spotify structured query.
+  # Threshold 0.7: компенсирует менее точный поиск без Spotify structured query.
   # Транслитерация в _best_match решает проблему кириллица/латиница.
   # 6 реплик: bottleneck (570K+ backlog кандидатов).
   #
   # Deezer IP-бюджет (10 rps суммарно на IP):
-  #   candidate-match-worker: 6 × 0.5 = 3 rps
+  #   candidate-match-worker: 12 × 0.3 = 3.6 rps
   #   deezer-direct-worker:   3 × 2   = 6 rps
   #   ИТОГО: 9 rps ✅
   candidate-match-worker:
     environment:
       WORKER_TYPE: candidate_match_worker
       SPOTIFY_ENABLED: "false"
-      CANDIDATE_MATCH_CONFIDENCE: "0.75"
-      DEEZER_RATE_LIMIT_RPS: "0.5"
+      CANDIDATE_MATCH_CONFIDENCE: "0.7"
+      DEEZER_RATE_LIMIT_RPS: "0.3"
       JIOSAAVN_RATE_LIMIT_RPS: "0.5"
     deploy:
-      replicas: 6
+      replicas: 12
 
   # ── Deezer BFS → 3 реплики × 2 rps = 6 rps ───────────────────────────────
   # IP limit Deezer = 10 rps суммарно. candidate-match-worker берёт 3 rps →
@@ -77,7 +77,7 @@ services:
       WORKER_TYPE: deezer_direct_worker
       DEEZER_RATE_LIMIT_RPS: "2"
       DEEZER_TOP_TRACKS_LIMIT: "100"
-      DEEZER_MAX_ALBUMS_PER_ARTIST: "50"
+      DEEZER_MAX_ALBUMS_PER_ARTIST: "20"
     deploy:
       replicas: 3
 
