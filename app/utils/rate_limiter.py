@@ -29,9 +29,14 @@ class RateLimiter:
         Args:
             rate: Maximum requests per second (token refill rate).
             capacity: Bucket size in tokens. Defaults to ``rate`` (1-second burst).
+                Must be >= 1.0 so that ``acquire(tokens=1.0)`` can always be satisfied.
+                If the computed capacity is less than 1.0, it is raised to 1.0.
         """
         self._rate = rate
-        self._capacity = capacity if capacity is not None else rate
+        raw_capacity = capacity if capacity is not None else rate
+        # Capacity must be at least 1.0: if capacity < 1.0, acquire(1.0) would
+        # loop forever because _refill() caps at capacity and can never reach 1.
+        self._capacity = max(raw_capacity, 1.0)
         self._tokens: float = self._capacity
         self._last_refill: float = time.monotonic()
         self._lock = asyncio.Lock()
