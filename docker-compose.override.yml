@@ -32,17 +32,15 @@ services:
     deploy:
       replicas: 0
 
-  # artist-graph-worker: Spotify отключён → Deezer fallback.
-  # Резолвит артистов по имени через Deezer search, собирает треки, BFS через related artists.
-  # Треки дедублируются через ISRC/fingerprint — дублей с deezer-direct-worker нет.
-  # Deezer IP budget: candidate-match 3 rps + deezer-direct 6 rps + artist-graph 1 rps = 10 rps ✅
+  # artist-graph-worker: Spotify отключён → почти не делает полезной работы.
+  # 1 реплика × 1 rps = 1 rps Deezer.
   artist-graph-worker:
     environment:
       WORKER_TYPE: artist_graph_worker
       SPOTIFY_ENABLED: "false"
       DEEZER_RATE_LIMIT_RPS: "1"
     deploy:
-      replicas: 3
+      replicas: 1
 
   regional-seed-worker:
     deploy:
@@ -52,18 +50,19 @@ services:
   # Источники по приоритету: Deezer → JioSaavn → iTunes.
   # Threshold 0.7: компенсирует менее точный поиск без Spotify structured query.
   # Транслитерация в _best_match решает проблему кириллица/латиница.
-  # 6 реплик: bottleneck (570K+ backlog кандидатов).
+  # 12 реплик: bottleneck (558K+ backlog кандидатов).
   #
   # Deezer IP-бюджет (10 rps суммарно на IP):
-  #   candidate-match-worker: 12 × 0.3 = 3.6 rps
-  #   deezer-direct-worker:   3 × 2   = 6 rps
-  #   ИТОГО: 9 rps ✅
+  #   candidate-match-worker: 12 × 0.4 = 4.8 rps
+  #   deezer-direct-worker:    2 × 2   = 4.0 rps
+  #   artist-graph-worker:     1 × 1   = 1.0 rps
+  #   ИТОГО: 9.8 rps ✅
   candidate-match-worker:
     environment:
       WORKER_TYPE: candidate_match_worker
       SPOTIFY_ENABLED: "false"
       CANDIDATE_MATCH_CONFIDENCE: "0.7"
-      DEEZER_RATE_LIMIT_RPS: "0.3"
+      DEEZER_RATE_LIMIT_RPS: "0.4"
       JIOSAAVN_RATE_LIMIT_RPS: "0.5"
     deploy:
       replicas: 12
@@ -79,7 +78,7 @@ services:
       DEEZER_TOP_TRACKS_LIMIT: "100"
       DEEZER_MAX_ALBUMS_PER_ARTIST: "20"
     deploy:
-      replicas: 3
+      replicas: 2
 
   # ── iTunes → 3 реплики ────────────────────────────────────────────────────
   # iTunes rate limit per-instance, не per-IP. 3 реплики × 6 rps = 18 rps суммарно.
